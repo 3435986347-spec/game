@@ -1,0 +1,19 @@
+# 象棋自学应用配置（个人本机使用）。相对路径以本文件所在目录为基准。
+
+[server]
+host = "127.0.0.1"
+port = 8000
+static_dir = "frontend/dist"   # 前端构建产物目录（cd frontend && npm run build 生成）
+
+[rules]
+move_limit = 60          # 自然限着：连续多少回合无吃子判和，0 表示不限
+repetition_count = 3     # 同一局面出现几次进入重复判定（长将判负，其余判和）
+
+# 以下配置在后续阶段启用：
+# [engine]
+# path = "engines/pikafish"
+# threads = 4
+# hash_mb = 256
+#
+# [llm]
+# provider = "none"      # "openai_compat" | "claude" | "none"

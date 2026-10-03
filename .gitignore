@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# 前端
+frontend/node_modules/
+frontend/dist/
+
+# 本地数据与引擎：第三方棋谱、数据库、引擎二进制都不提交
+data/
+engines/
+*.db
+
+# 密钥
+.env

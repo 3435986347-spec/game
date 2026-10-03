@@ -1,0 +1,35 @@
+[project]
+name = "xiangqi"
+version = "0.1.0"
+description = "中国象棋自学应用：规则引擎、人机对战、AI 提示、棋谱训练"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
+
+[project.scripts]
+xiangqi = "xiangqi.__main__:main"
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.13.1",
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: 较慢的测试（如 perft 深度 4，约 10 秒），默认跳过；用 pytest -m slow 运行"]
+addopts = "-m 'not slow'"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

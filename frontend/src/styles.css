@@ -1,0 +1,359 @@
+:root {
+  --bg: #f4f1ea;
+  --panel: #ffffff;
+  --text: #2b2620;
+  --muted: #7a7065;
+  --border: #e3dccf;
+  --accent: #b23a2e;
+  --accent-text: #ffffff;
+  --red-piece: #b8261b;
+  --black-piece: #1f1f1f;
+  --board: #e8c88f;
+  --board-line: #6b4a24;
+  --error-bg: #fdecea;
+  --error-text: #a3261b;
+  font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1d1b18;
+    --panel: #2a2723;
+    --text: #ece6dc;
+    --muted: #a59b8e;
+    --border: #3d3832;
+    --error-bg: #3d1f1b;
+    --error-text: #ffb4a8;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+}
+
+.app {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 20px 24px 32px;
+}
+
+.app-header {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 26px;
+  letter-spacing: 2px;
+}
+
+.stage {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(420px, 640px) minmax(300px, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+/* ---------- 棋盘 ---------- */
+
+.board-panel {
+  position: sticky;
+  top: 16px;
+}
+
+.board {
+  width: 100%;
+  height: auto;
+  display: block;
+  user-select: none;
+}
+
+.board-placeholder {
+  aspect-ratio: 9 / 10;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--board);
+  color: var(--board-line);
+}
+
+.board-bg {
+  fill: var(--board);
+}
+
+.grid line,
+.grid-border {
+  stroke: var(--board-line);
+  stroke-width: 1.4;
+  fill: none;
+}
+
+.grid-border {
+  stroke-width: 2.6;
+}
+
+.marker {
+  stroke: var(--board-line);
+  stroke-width: 1.4;
+  fill: none;
+}
+
+.river {
+  fill: var(--board-line);
+  font-family: "KaiTi", "STKaiti", "Noto Serif SC", serif;
+  font-size: 30px;
+  text-anchor: middle;
+  opacity: 0.85;
+}
+
+.file-labels text {
+  fill: var(--board-line);
+  font-size: 16px;
+  text-anchor: middle;
+}
+
+.last-move {
+  fill: rgba(255, 255, 255, 0.28);
+  stroke: rgba(160, 90, 20, 0.75);
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+}
+
+.piece-body {
+  fill: url(#piece-face);
+  stroke: #8a6a3a;
+  stroke-width: 1.5;
+}
+
+.piece-ring {
+  fill: none;
+  stroke-width: 1.6;
+}
+
+.piece.red .piece-ring {
+  stroke: var(--red-piece);
+}
+
+.piece.black .piece-ring {
+  stroke: var(--black-piece);
+}
+
+.piece-text {
+  font-family: "KaiTi", "STKaiti", "Noto Serif SC", serif;
+  font-size: 32px;
+  font-weight: 700;
+  text-anchor: middle;
+}
+
+.piece.red .piece-text {
+  fill: var(--red-piece);
+}
+
+.piece.black .piece-text {
+  fill: var(--black-piece);
+}
+
+.piece.selected .piece-body {
+  stroke: #1e7d4f;
+  stroke-width: 4;
+}
+
+.check-glow {
+  fill: rgba(220, 40, 30, 0.35);
+  stroke: rgba(220, 40, 30, 0.9);
+  stroke-width: 2;
+}
+
+.target-dot {
+  fill: rgba(30, 125, 79, 0.8);
+  pointer-events: none;
+}
+
+.target-capture {
+  fill: none;
+  stroke: rgba(30, 125, 79, 0.9);
+  stroke-width: 4;
+  pointer-events: none;
+}
+
+.hit {
+  fill: transparent;
+}
+
+.hit.clickable {
+  cursor: pointer;
+}
+
+/* ---------- 侧边栏 ---------- */
+
+.side-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.card h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.turn,
+.result {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.result {
+  color: var(--accent);
+}
+
+.turn-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--black-piece);
+}
+
+.turn.red .turn-dot {
+  background: var(--red-piece);
+}
+
+.check-badge {
+  font-size: 14px;
+  color: var(--accent-text);
+  background: var(--accent);
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+
+.error {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--error-bg);
+  color: var(--error-text);
+  font-size: 14px;
+}
+
+.buttons {
+  display: flex;
+  gap: 8px;
+  margin: 14px 0 10px;
+}
+
+button {
+  font: inherit;
+  font-size: 14px;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.inline-form {
+  display: flex;
+  gap: 8px;
+}
+
+.inline-form input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 14px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.move-list {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.move-list ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.move-list li {
+  display: grid;
+  grid-template-columns: 40px 1fr 1fr;
+  padding: 3px 0;
+  font-size: 16px;
+}
+
+.move-no {
+  color: var(--muted);
+}
+
+.move.current {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.move-list-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.fen-current {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+
+.fen-current code {
+  flex: 1;
+  font-size: 12px;
+  word-break: break-all;
+  color: var(--muted);
+}
+
+.hint {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
