@@ -1,85 +1,94 @@
 # 象棋自学 · AI 提示 · 人机对战 Web 应用 —— 技术方案
 
-> 版本：v0.1（方案稿）
-> 目标：一个可在浏览器里使用、以「自我提升」为核心的中国象棋应用：能和 AI 下棋，下棋时能要提示，下完能复盘并听懂自己错在哪，平时能做题、背开局、练残局。
+> 版本：v0.2（方案稿）
+> 目标：一个在电脑浏览器里使用、以「自我提升」为核心的中国象棋应用：能和 AI 下棋，下棋时能要提示，下完能复盘并听懂自己错在哪；能导入棋谱打谱、猜大师的着法、让 AI 解读名局；平时能做题、练开局和残局。
+>
+> **v0.2 变更**：按已确认的需求改为「个人自用 + 电脑 + Python 后端」；新增第 4 节「LLM 适配层（OpenAI 兼容 / Claude）」和第 5 节「棋谱模块」；规则引擎改为 Python 实现，相关代码均已用原型验证。
 
 ---
 
-## 0. 先说结论（最重要的三条）
+## 0. 需求决策与核心结论
 
-1. **不要让大模型（LLM）直接下棋或直接算棋。**
-   LLM 直接读棋盘时，常把子的位置看错，编出不合法的着法，也算不深。正确的分工是：
+### 0.1 已确认的需求
+
+| 问题 | 决定 | 对方案的影响 |
+|---|---|---|
+| 使用范围 | 个人自用 | 不需要账号系统；数据存在一个 SQLite 文件里；在本机运行，一条命令启动 |
+| 设备 | 电脑 | 宽屏布局（左边棋盘、右边分析面板）、支持键盘快捷键；引擎直接用本机原生 Pikafish，**不再需要浏览器端 WASM 引擎** |
+| 后端 | Python | FastAPI；规则引擎用纯 Python 写，是**唯一的规则来源**；前端只负责显示和交互 |
+| 大模型 | DeepSeek 一类（OpenAI 兼容接口）或 Claude | 统一的 `LLMProvider` 接口，两种实现，改配置文件即可切换；**没配 Key 时也能用**（退回模板讲解） |
+| 新增需求 | 棋谱 | 棋谱导入、打谱、猜着练习、名局 AI 解读、局面检索、从棋谱自动出题 |
+
+### 0.2 核心结论
+
+1. **不要让大模型直接下棋或算棋。** 大模型直接读棋盘时，常把子的位置看错、编出不合法的着法，也算不深。分工如下：
 
    | 角色 | 由谁担任 | 负责什么 |
    |---|---|---|
-   | 裁判 | 自写的**规则引擎**（TypeScript） | 着法是否合法、将军、胜负、记谱转换、战术特征提取 |
-   | 棋手 / 计算器 | 专业**象棋引擎** Pikafish / Fairy-Stockfish | 算最佳着法、评估分数、给出主要变化 |
-   | 教练（讲解员） | **LLM**（Claude API） | 把引擎算出的结果「翻译」成人话，解释为什么 |
+   | 裁判 | 自写的**规则引擎**（Python） | 着法是否合法、将军、胜负、记谱转换、棋谱解析、战术特征提取 |
+   | 棋手 / 计算器 | 开源**象棋引擎** Pikafish | 算最佳着法、评估分数、给出主要变化 |
+   | 教练（讲解员） | **大模型**（DeepSeek / Claude） | 把算好的结果「翻译」成人话，推断着法意图，总结原则 |
 
-2. **「棋盘转成数据」不是一个格式，而是分层的几种表示**，每一层喂给不同的「模型」：
+2. **「棋盘转成数据」不是一种格式，而是分层的几种表示**，每一层喂给不同的「模型」：
 
    ```
-   内部数组 Int8Array(90) ──► 规则引擎（合法性、特征）
+   内部数组 list[int]（长度 90）──► 规则引擎（合法性、特征、棋谱回放校验）
           │
           ├──► FEN + ICCS 坐标着法 ──► 象棋引擎（UCI 协议）
           │
-          ├──► 张量 [C, 10, 9] + 2086/2062 维策略 ──► 神经网络（可选，自训练时才需要）
+          ├──► 张量 [14, 10, 9] + 2062 维策略 ──► 神经网络（可选，自训练时才需要）
           │
-          └──► 结构化 JSON + 文字棋盘 + 中文记谱 + 已算好的事实 ──► LLM（只负责讲解）
+          └──► 结构化 JSON：文字棋盘 + 中文记谱 + 已算好的事实 ──► 大模型（只负责讲解）
    ```
 
-   第 3 节会把每一层的格式、示例、代码都写清楚。
-
-3. **先把 MVP 做出来，不需要自己训练模型**：规则引擎 + 开源引擎 + LLM 讲解，已经能做出「人机对战 + 提示 + 复盘讲解」的完整闭环。自训练神经网络放到最后作为可选项（用来做「像人一样下棋」的低级别 AI）。
+3. **MVP 不需要自己训练模型**：规则引擎 + Pikafish + 大模型讲解，已经能做出完整的「对战 → 提示 → 复盘 → 棋谱训练」闭环。自训练神经网络放到最后作为可选项；到那时导入的棋谱库正好是训练数据。
 
 ---
 
-## 1. 产品目标与功能
-
-### 1.1 目标用户
-入门到业余中级、想系统提升的个人棋手。核心诉求：**知道自己哪里错了、为什么错、以后怎么避免**。
-
-### 1.2 功能清单
+## 1. 功能清单
 
 | 模块 | 功能 | 优先级 |
 |---|---|---|
-| 人机对战 | 执红 / 执黑；10 个难度级别；悔棋；认输 / 求和；可选计时 | P0 |
+| 规则引擎 | 着法生成、将军与胜负判定、中文记谱双向转换、FEN | P0（一切的基础） |
+| 人机对战 | 执红 / 执黑；10 个难度级别；悔棋；认输 / 求和 | P0 |
 | AI 提示 | 三级渐进提示（方向 → 该动哪个子 → 具体着法 + 原因） | P0 |
-| 对局复盘 | 胜率曲线；每步评级（好棋 / 缓着 / 失误 / 漏着）；关键时刻；LLM 中文讲解 | P0 |
-| 分析模式 | 摆任意局面；FEN 导入导出；引擎多线分析 | P1 |
-| 杀法 / 战术题库 | 经典杀法、战术组合题；题目难度分；按主题练习 | P1 |
-| 错题本 | 自己对局中的失误局面自动入库，按间隔重复算法安排复习 | P1 |
-| 开局训练 | 开局树浏览；跟练主流变化；偏离时提示 | P2 |
-| 残局训练 | 和引擎下指定残局，要求 N 步内取胜或守和 | P2 |
-| 学习画像 | 棋力分（人机 + 做题）；各主题正确率；弱项推荐 | P2 |
-| 像人一样的 AI | 按棋力段模仿人类着法的神经网络（自训练） | P3（可选） |
+| 棋谱库 | 导入棋谱文件；按棋手、赛事、开局、局面搜索；打谱；试走变化 | P0 |
+| 对局复盘 | 胜率曲线；每步评级；关键时刻；大模型讲解 | P1 |
+| 猜着练习 | 跟着大师对局一步步猜下一着，引擎打分 | P1 |
+| 名局 AI 解读 | 引擎整盘分析 + 大模型推断关键着法的意图、分阶段总结 | P1 |
+| 局面统计 | 当前局面在棋谱库里出现过多少次，后续各着法的胜率（开局浏览器） | P1 |
+| 题库 / 错题本 | 从棋谱和自己的对局自动出题；失误局面自动入错题本；间隔重复复习 | P1 |
+| 开局 / 残局训练 | 开局跟练；指定残局和引擎对下 | P2 |
+| 学习画像 | 个人棋力分；各主题正确率；弱项推荐 | P2 |
+| 大师风格 AI | 用棋谱库训练「模仿人类着法」的神经网络 | P3（可选） |
 
 ---
 
-## 2. 总体架构
+## 2. 总体架构（本机运行）
 
 ```
-┌──────────────────────────── 浏览器 ────────────────────────────┐
-│  React UI（SVG 棋盘、复盘面板、题库、错题本）                     │
-│        │                                                         │
-│        ├── packages/core：规则引擎、FEN、中文记谱、特征提取（TS）   │
-│        │                                                         │
-│        └── Web Worker：象棋引擎 WASM（对局、快速提示，离线可用）    │
-└───────────────┬─────────────────────────────────────────────────┘
-                │ HTTPS / JSON
-┌───────────────▼──────────────────── 服务端 ─────────────────────┐
-│  API 服务（Node.js + Fastify，复用 packages/core）                │
-│   ├── 深度分析：Pikafish 原生进程池（UCI 协议）                   │
-│   ├── 讲解服务：特征提取 → 组装 Prompt → Claude API → 输出校验     │
-│   ├── 题库 / 错题本 / 对局记录 / 用户数据（PostgreSQL，MVP 可 SQLite）│
-│   └── 缓存：(FEN, 着法, 级别) → 分析结果 / 讲解文本                │
-└──────────────────────────────────────────────────────────────────┘
+┌──────────────── 浏览器（http://localhost:8000）─────────────────┐
+│  React + TypeScript：SVG 棋盘、着法列表、胜率曲线、讲解面板        │
+│  只负责显示和交互，所有规则判断都交给后端                          │
+└─────────────┬─────────────────────────────────┬────────────────┘
+              │ HTTP（走子、查询、导入）           │ WebSocket（引擎实时分析）
+┌─────────────▼─────────────────────────────────▼────────────────┐
+│  Python 后端（FastAPI + uvicorn）                                 │
+│   xiangqi.core      规则引擎：合法着法、胜负、记谱、FEN、特征       │
+│   xiangqi.engine    Pikafish 子进程 ×2（对局用 / 分析用，互不阻塞） │
+│   xiangqi.llm       LLMProvider：OpenAI 兼容 | Claude | 模板兜底   │
+│   xiangqi.games     棋谱解析、导入校验、局面索引、开局识别          │
+│   xiangqi.training  复盘、猜着、题库、错题本                       │
+│   SQLite：data/xiangqi.db                                         │
+└──────────┬────────────────────────────────────┬─────────────────┘
+           │ stdin/stdout（UCI 协议）              │ HTTPS
+     Pikafish 可执行文件                    DeepSeek / Claude API
 ```
 
-**为什么前后端都有引擎？**
-- 浏览器端 WASM：下棋零延迟、不花服务器钱、断网也能玩。
-- 服务端原生 Pikafish：复盘时要对整盘棋每一步做深度分析，原生多线程比 WASM 快很多，并且结果可以缓存共享。
-- LLM 调用必须走服务端：API Key 不能放在前端。
+设计要点：
+- **规则只在后端写一份。** 每次局面变化，后端返回的数据里直接带上当前全部合法着法，前端据此高亮可走位置、拦截非法拖动，不需要额外请求。本机通信延迟只有毫秒级，体验上和前端自己判断没有区别。
+- **两个引擎实例**：一个给 AI 对手下棋用，一个给分析面板做持续分析，互不干扰。
+- **一条命令启动**：`uv run xiangqi` 启动后端，后端同时提供构建好的前端页面并自动打开浏览器。
 
 ---
 
@@ -109,131 +118,153 @@
 - 一维下标：`sq = rank * 9 + file`，范围 0–89。例如红方右车 `i0` = 8，黑将 `e9` = 85。
 - 纵线编号：红方 `a..i` 对应 `九..一`，即 `9 - file`；黑方 `a..i` 对应 `1..9`，即 `file + 1`。两方都是**从自己的右手边数起**。
 
-### 3.2 第 1 层：内部表示（给规则引擎）
+### 3.2 第 1 层：内部表示与规则引擎
 
 #### 数据结构
 
-```ts
-// 棋子：正数红方，负数黑方，0 为空
-export const enum PT { King = 1, Advisor, Bishop, Knight, Rook, Cannon, Pawn } // 帅仕相马车炮兵
-export type Piece = number;   // ±1..±7
-export type Square = number;  // 0..89
+```python
+# xiangqi/core/board.py
+from dataclasses import dataclass, field
 
-export const sq = (file: number, rank: number): Square => rank * 9 + file;
-export const fileOf = (s: Square) => s % 9;
-export const rankOf = (s: Square) => (s / 9) | 0;
-export const onBoard = (f: number, r: number) => f >= 0 && f < 9 && r >= 0 && r < 10;
+KING, ADVISOR, BISHOP, KNIGHT, ROOK, CANNON, PAWN = range(1, 8)  # 帅仕相马车炮兵；红方为正，黑方为负
 
-export interface Position {
-  board: Int8Array;      // 长度 90
-  turn: 1 | -1;          // 1 = 红走，-1 = 黑走
-  halfmoveClock: number; // 距上次吃子的半回合数（自然限着用）
-  keys: bigint[];        // 历史局面的 Zobrist 哈希（重复局面、长将检测用）
-}
+def sq(file: int, rank: int) -> int: return rank * 9 + file
+def file_of(s: int) -> int: return s % 9
+def rank_of(s: int) -> int: return s // 9
+def on_board(f: int, r: int) -> bool: return 0 <= f < 9 and 0 <= r < 10
 
-// 着法打包成一个整数：from(7 bit) | to(7 bit) << 7
-export type Move = number;
-export const makeMove = (from: Square, to: Square): Move => from | (to << 7);
+@dataclass
+class Position:
+    board: list[int]                 # 长度 90，0 为空
+    turn: int = 1                    # 1 = 红走，-1 = 黑走
+    halfmove_clock: int = 0          # 距上次吃子的半回合数（自然限着用）
+    history: list[int] = field(default_factory=list)  # 历史局面的 Zobrist 哈希（重复局面、长将检测用）
+
+Move = tuple[int, int]               # (起点, 终点)；对外和存库时统一用 ICCS 字符串，如 "h2e2"
 ```
 
-为什么用简单的 `Int8Array(90)` 而不用位棋盘（bitboard）？
-- 象棋 90 个点超出 64 位，位棋盘要 128 位；Pikafish 内部就是这么做的，但那是为了每秒搜索上千万个局面。
-- 我们的 TS 规则引擎**只负责正确性**（真正的搜索交给 WASM / 原生引擎），每步生成一次着法，简单数组完全够快，也最好调试。
+为什么用简单的数组而不用位棋盘（bitboard）？
+- 象棋 90 个点超出 64 位，位棋盘要 128 位；Pikafish 内部就是这么做的，因为它每秒要搜索上千万个局面。
+- 我们的规则引擎**只负责正确性**，搜索交给 Pikafish。数组最直观、最好调试，配合下面的预计算表，速度完全够用。
 
-#### 着法生成要点（象棋特有规则）
+#### Python 提速关键：预计算表
+
+程序启动时把「每个格子上的马能跳到哪、马腿在哪」「每个格子四个方向的射线」算好，生成着法时直接查表，省掉大量边界判断：
+
+```python
+# 马：[落点 df, dr, 马腿 lf, lr]
+KNIGHT_STEPS = [(1, 2, 0, 1), (-1, 2, 0, 1), (1, -2, 0, -1), (-1, -2, 0, -1),
+                (2, 1, 1, 0), (2, -1, 1, 0), (-2, 1, -1, 0), (-2, -1, -1, 0)]
+
+KNIGHT_MOVES = [[] for _ in range(90)]       # KNIGHT_MOVES[s] = [(落点, 马腿), ...]
+for s in range(90):
+    f, r = file_of(s), rank_of(s)
+    for df, dr, lf, lr in KNIGHT_STEPS:
+        if on_board(f + df, r + dr):
+            KNIGHT_MOVES[s].append((sq(f + df, r + dr), sq(f + lf, r + lr)))
+
+KNIGHT_ATTACKERS = [[] for _ in range(90)]   # 反查表：哪些格子上的马能跳到 s，以及那匹马的马腿
+for n in range(90):
+    for to, leg in KNIGHT_MOVES[n]:
+        KNIGHT_ATTACKERS[to].append((n, leg))
+
+RAYS = [[] for _ in range(90)]               # RAYS[s] = 四个方向上由近到远的格子列表（车、炮、将帅照面用）
+for s in range(90):
+    for df, dr in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        ray, f, r = [], file_of(s) + df, rank_of(s) + dr
+        while on_board(f, r):
+            ray.append(sq(f, r))
+            f, r = f + df, r + dr
+        RAYS[s].append(ray)
+```
+
+#### 着法规则（象棋特有的部分）
 
 | 棋子 | 规则 | 实现要点 |
 |---|---|---|
-| 车 | 直线任意格，不能越子 | 四个方向循环，遇子停止（对方子可吃） |
-| 炮 | 不吃子时同车；**吃子必须隔一个子（炮架）** | 循环中记录 `jumped` 状态 |
-| 马 | 走日字；**蹩马腿** | 8 个落点各对应一个「马腿」格，马腿有子则不能走 |
+| 车 | 直线任意格，不能越子 | 沿 `RAYS` 走，遇子停止（对方子可吃） |
+| 炮 | 不吃子时同车；**吃子必须隔一个子（炮架）** | 沿 `RAYS` 走，记录是否已越过炮架 |
+| 马 | 走日字；**蹩马腿** | 查 `KNIGHT_MOVES`，马腿有子则不能走 |
 | 相/象 | 走田字；**塞象眼**；**不能过河** | 田字中心有子则不能走；红相 rank ≤ 4，黑象 rank ≥ 5 |
 | 仕/士 | 斜走一格，限九宫 | 九宫：file 3–5，红 rank 0–2，黑 rank 7–9 |
-| 帅/将 | 直走一格，限九宫；**两将不能照面** | 照面检查放在合法性过滤里 |
+| 帅/将 | 直走一格，限九宫；**两将不能照面** | 照面检查合并进「是否被将军」 |
 | 兵/卒 | 过河前只能前进；过河后可左右 | 红 rank ≥ 5 视为已过河，黑 rank ≤ 4 |
 
-示例：马和炮的生成
+#### 将军检测：从帅的位置反向查（最容易出 bug 的地方）
 
-```ts
-// [落点 df, dr, 马腿 lf, lr]
-const KNIGHT_STEPS = [
-  [ 1,  2, 0,  1], [-1,  2, 0,  1], [ 1, -2, 0, -1], [-1, -2, 0, -1],
-  [ 2,  1, 1,  0], [ 2, -1, 1,  0], [-2,  1, -1, 0], [-2, -1, -1, 0],
-] as const;
+最直接的写法是「生成对方所有着法，看有没有能吃到帅的」，但这很慢。更好的办法是从帅的位置**反向查找**：
 
-function genKnight(pos: Position, from: Square, out: Move[]) {
-  const f = fileOf(from), r = rankOf(from);
-  for (const [df, dr, lf, lr] of KNIGHT_STEPS) {
-    if (!onBoard(f + df, r + dr)) continue;
-    if (pos.board[sq(f + lf, r + lr)] !== 0) continue;       // 蹩马腿
-    const to = sq(f + df, r + dr);
-    if (pos.board[to] * pos.turn > 0) continue;              // 不能吃己方
-    out.push(makeMove(from, to));
-  }
-}
+```python
+def in_check(b: list[int], side: int) -> bool:
+    """side 方（1 红 / -1 黑）的帅/将是否正被将军。
+    仕、相不能离开己方半场，永远将不到对方，所以只需要查车、炮、马、兵和将帅照面。"""
+    k = b.index(KING * side)
+    enemy = -side
+    for ray in RAYS[k]:                                   # 车、炮，以及将帅照面
+        screen = False
+        for t in ray:
+            p = b[t]
+            if p == 0:
+                continue
+            if not screen:
+                if p == enemy * ROOK or p == enemy * KING:  # 中间无子直接碰到对方将帅 = 照面
+                    return True
+                screen = True                                # 第一个子当作炮架
+            else:
+                if p == enemy * CANNON:
+                    return True
+                break
+    for n, leg in KNIGHT_ATTACKERS[k]:                    # 马：马腿在「马」旁边，不在帅旁边！
+        if b[n] == enemy * KNIGHT and b[leg] == 0:
+            return True
+    f, r = file_of(k), rank_of(k)
+    if on_board(f, r + side) and b[sq(f, r + side)] == enemy * PAWN:   # 对方兵从正前方攻来
+        return True
+    for df in (-1, 1):                                    # 能走到我方九宫旁的兵一定已过河，可横向攻击
+        if on_board(f + df, r) and b[sq(f + df, r)] == enemy * PAWN:
+            return True
+    return False
 
-function genCannon(pos: Position, from: Square, out: Move[]) {
-  for (const [df, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-    let f = fileOf(from) + df, r = rankOf(from) + dr, jumped = false;
-    while (onBoard(f, r)) {
-      const p = pos.board[sq(f, r)];
-      if (!jumped) {
-        if (p === 0) out.push(makeMove(from, sq(f, r)));     // 不吃子时像车
-        else jumped = true;                                   // 找到炮架
-      } else if (p !== 0) {
-        if (p * pos.turn < 0) out.push(makeMove(from, sq(f, r))); // 隔一子吃对方
-        break;
-      }
-      f += df; r += dr;
-    }
-  }
-}
+def legal_moves(pos: Position) -> list[Move]:
+    b, side, out = pos.board, pos.turn, []
+    for frm, to in pseudo_legal_moves(pos):               # 按上表生成的「伪合法」着法
+        cap = b[to]; b[to] = b[frm]; b[frm] = 0           # 走一步
+        if not in_check(b, side):                         # 走完后己方不能被将（含照面）
+            out.append((frm, to))
+        b[frm] = b[to]; b[to] = cap                       # 撤销
+    return out
 ```
 
-#### 合法性 = 伪合法着法 + 走完后己方不被将 + 两将不照面
-
-```ts
-function kingsFacing(board: Int8Array): boolean {
-  const rk = board.indexOf(PT.King), bk = board.indexOf(-PT.King); // 红帅总在下方，rk < bk
-  if (fileOf(rk) !== fileOf(bk)) return false;
-  for (let s = rk + 9; s < bk; s += 9) if (board[s] !== 0) return false;
-  return true;
-}
-
-function legalMoves(pos: Position): Move[] {
-  const me = pos.turn;
-  return pseudoLegalMoves(pos).filter((m) => {
-    const captured = doMove(pos, m);   // 会切换 turn
-    const ok = !kingsFacing(pos.board) && !isAttacked(pos, kingSquare(pos, me), -me);
-    undoMove(pos, m, captured);
-    return ok;
-  });
-}
-```
+> **典型 bug**：反查马的攻击时，直接用帅旁边的格子当马腿。马腿永远是**马自己旁边**、沿长边方向的那一格，所以要用单独的反查表 `KNIGHT_ATTACKERS`。测试里一定要有「马腿被堵住，但帅旁边那一格是空的」这种局面。
 
 #### 胜负与特殊规则
 
 - **将死**：被将军且无合法着法 → 负。
-- **困毙**：没被将军但无合法着法 → **也判负**（和国际象棋的「逼和」不同，一定要注意）。
+- **困毙**：没被将军但无合法着法 → **也判负**（和国际象棋的「逼和」不同）。
 - **重复局面**：用 Zobrist 哈希记录历史局面；同一局面出现 3 次进入判定。
 - **长将**：一方连续将军造成重复 → 长将方判负。
-- **长捉**：连续捉对方无根子造成重复 → 判负。这是规则引擎最复杂的部分（要判断「捉」「有根」「兑子」等），**MVP 先只实现长将判负 + 其他重复判和**，长捉后续迭代。
+- **长捉**：连续捉对方无根子造成重复 → 判负。这是规则引擎最复杂的部分（要判断「捉」「有根」「兑子」等），**MVP 先只实现「长将判负 + 其他重复判和」**，长捉以后再迭代。
 - **自然限着**：连续若干回合（常用 60 回合）无吃子 → 判和，做成可配置项。
 
 #### 用 perft 测试保证正确性
 
-perft(n) = 从某局面出发走 n 步的所有合法着法序列数。它是检验着法生成器是否正确的标准方法。初始局面的标准值：
+perft(n) = 从某局面出发走 n 步的所有合法着法序列数，这是检验着法生成器的标准方法。初始局面的标准值，以及按上面的写法用纯 CPython 单线程实测的耗时：
 
-| 深度 | 节点数 |
-|---|---|
-| 1 | 44 |
-| 2 | 1,920 |
-| 3 | 79,666 |
-| 4 | 3,290,240 |
+| 深度 | 节点数 | 实测耗时 |
+|---|---|---|
+| 1 | 44 | < 0.01 秒 |
+| 2 | 1,920 | 0.01 秒 |
+| 3 | 79,666 | 0.2 秒 |
+| 4 | 3,290,240 | 约 10 秒 |
 
-本方案写作时已用一个最小的 Python 原型核对过深度 1–4。除初始局面外，还应加入若干包含蹩马腿、塞象眼、炮架、将帅照面的特殊局面做 perft 回归测试。
+规则引擎每走一步只需生成一次着法（约 0.1 毫秒），即使批量导入上千盘棋谱也只要几十秒。
 
-### 3.3 第 2 层：引擎格式（给 Pikafish / Fairy-Stockfish）
+必备测试用例：
+- 初始局面 perft 1–4；再加几个特殊局面：蹩马腿、塞象眼、炮架、将帅照面、过河兵。
+- 将军检测：炮隔子将军、马腿被堵（不算将军）、将帅照面、过河兵横向将军。
+- 记谱：见 3.6 节的对照表，包括「前 / 后」的情况。
+
+### 3.3 第 2 层：引擎格式（给 Pikafish）
 
 #### FEN：一行字符串描述一个局面
 
@@ -256,11 +287,11 @@ rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1
 
 #### 着法：ICCS 坐标
 
-`起点列 起点行 终点列 终点行`，例如 `h2e2` = 炮二平五，`h9g7` = 马8进7。
+`起点列 起点行 终点列 终点行`，例如 `h2e2` = 炮二平五，`h9g7` = 马8进7。棋谱文件里常写成大写加横线（`H2-E2`），导入时统一转成小写、去掉横线。
 
-**另一个兼容性坑**：Pikafish 行号是 0–9（`h2e2`），Fairy-Stockfish 行号是 1–10（同一步写成 `h3e3`，黑马跳写成 `h10g8`）。在**引擎适配层**统一转换，业务代码只认 0–9。
+（若以后换用 Fairy-Stockfish：它的行号是 1–10，同一步写成 `h3e3`，需要在适配层转换。）
 
-#### UCI 协议交互（Pikafish 使用 UCI）
+#### UCI 协议交互
 
 ```
 > uci
@@ -282,45 +313,49 @@ rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1
 - **分数是「当前走棋方」视角**。统一转换成**红方视角**再存储，否则胜率曲线会来回跳。
 - `score mate 3` 表示 3 步内杀（负数表示被杀），要单独处理，不能当成普通分数。
 
-#### 分数 → 胜率
+#### Python 异步适配器
 
-人对「胜率」的感知比「分数」直观得多，而且在 +800 分的局面里再丢 100 分几乎不影响结果。所以所有评级都基于胜率：
+```python
+# xiangqi/engine/uci.py
+from collections.abc import AsyncIterator, Sequence
 
-```ts
-// 若引擎支持 WDL 输出（UCI_ShowWDL），优先直接用引擎给的胜/和/负概率；
-// 否则用逻辑函数近似，K 需要用实际对局数据标定
-const winProb = (cpRedView: number, K = 200) => 1 / (1 + Math.exp(-cpRedView / K));
+@dataclass
+class AnalysisLine:
+    move: str               # ICCS
+    score_cp: int | None    # 红方视角
+    mate_in: int | None     # 红方视角
+    win_prob: float         # 红方胜率 0..1
+    pv: list[str]           # 主要变化（ICCS）
+    depth: int
+
+class UciEngine:
+    async def start(self, path: str, options: dict[str, str | int]) -> None: ...
+    async def analyse(self, fen: str, moves: Sequence[str] = (), *, movetime_ms: int | None = None,
+                      depth: int | None = None, nodes: int | None = None,
+                      multipv: int = 1) -> list[AnalysisLine]: ...
+    def analyse_stream(self, fen: str, moves: Sequence[str] = ()) -> AsyncIterator[AnalysisLine]: ...  # 推给 WebSocket
+    async def stop(self) -> None: ...
 ```
 
-#### 引擎适配层接口
+实现要点：用 `asyncio.create_subprocess_exec` 启动引擎，逐行读取 stdout；每个引擎实例配一把 `asyncio.Lock`，保证同一时间只处理一个请求。注意 `python-chess` 库不支持中国象棋，UCI 解析需要自己写（不到 200 行）。
 
-```ts
-interface EngineAdapter {
-  init(options: Record<string, string | number>): Promise<void>;
-  analyse(req: {
-    fen: string;
-    moves?: string[];        // ICCS，0–9 行号
-    limit: { movetimeMs?: number; depth?: number; nodes?: number };
-    multiPV?: number;
-  }): Promise<AnalysisLine[]>;
-  stop(): void;
-}
+#### 分数 → 胜率
 
-interface AnalysisLine {
-  move: string;              // ICCS
-  scoreCp?: number;          // 红方视角
-  mateIn?: number;           // 红方视角
-  winProb: number;           // 红方胜率 0..1
-  pv: string[];              // 主要变化（ICCS）
-  depth: number;
-}
-// 实现：PikafishProcessAdapter（服务端 child_process）、FairyStockfishWasmAdapter（浏览器 Worker）
+人对「胜率」的感知比「分数」直观，而且在 +800 分的局面里再丢 100 分几乎不影响结果，所以所有评级都基于胜率：
+
+```python
+import math
+
+def win_prob(cp_red_view: float, k: float = 200.0) -> float:
+    """优先使用引擎直接输出的胜/和/负概率（若支持 UCI_ShowWDL）；
+    否则用逻辑函数近似，k 需要用棋谱库里的真实对局结果来标定。"""
+    return 1.0 / (1.0 + math.exp(-cp_red_view / k))
 ```
 
 ### 3.4 第 3 层：神经网络张量（可选：自训练模型时才需要）
 
-**MVP 不需要这一层。** 只有当你想做以下事情时才需要：
-- **像人一样下棋的 AI**：按棋力段（如 1200 分、1500 分）训练策略网络去预测「这个水平的人类会怎么走」。这样的低级别对手比「引擎随机走错」自然得多，还能告诉用户「你这个水平的人在这里最常犯什么错」。
+**MVP 不需要这一层。** 只有在以下情况才需要：
+- **大师风格 / 人类风格的 AI**：用棋谱库训练策略网络去预测「大师（或某个水平的人）在这里会怎么走」。这样的对手比「引擎故意随机走错」自然得多，还能告诉你「同水平的人在这里最常犯什么错」。
 - 研究、学习 AlphaZero 式训练。
 
 不建议自己训练「最强引擎」：Pikafish 已经远超人类顶尖水平。
@@ -335,7 +370,7 @@ interface AnalysisLine {
 （可选）平面 14+ ：前 N 步的历史局面、重复次数、无吃子步数（归一化成常数平面）
 ```
 
-关键技巧——**视角归一化**：总是让「轮到走棋的一方」在棋盘下方。黑方走时把棋盘上下翻转、红黑互换。这样网络只需学一种视角，数据利用率翻倍。象棋规则在「上下翻转 + 换色」下完全对称，所以这样做不会改变规则。
+关键技巧是**视角归一化**：总是让「轮到走棋的一方」在棋盘下方。黑方走时把棋盘上下翻转、红黑互换。这样网络只需学一种视角，数据利用率翻倍。象棋规则在「上下翻转 + 换色」下完全对称，这样做不改变规则。
 
 ```python
 import numpy as np
@@ -359,12 +394,14 @@ def encode(fen: str) -> np.ndarray:
     return planes
 ```
 
+（已验证：初始局面红走和黑走编码出的张量完全相同，说明视角归一化正确。）
+
 #### 输出：策略头 + 价值头
 
 - **价值头**：一个标量 ∈ [-1, 1]（走棋方的期望得分），或胜/和/负三分类。
-- **策略头**：给每一个「几何上可能出现的着法」一个编号，网络输出每个编号的概率。
+- **策略头**：给每一个「几何上可能出现的着法」编一个号，网络输出每个编号的概率。
 
-象棋的全部可能着法（从 A 点到 B 点）枚举：
+象棋的全部可能着法（从 A 点到 B 点）枚举如下：
 
 | 类别 | 数量 | 说明 |
 |---|---|---|
@@ -375,33 +412,34 @@ def encode(fen: str) -> np.ndarray:
 | **合计（不做视角翻转）** | **2086** | |
 | **合计（做视角翻转，只需己方的相、仕）** | **2062** | 1530 + 508 + 16 + 8 |
 
-这些数字已用脚本枚举核对过。也可以用更简单的 `90 × 90 = 8100` 维输出，但大部分位置永远不会被用到，训练效率低。
+这些数字已用脚本枚举核对过。也可以用更简单的 `90 × 90 = 8100` 维输出，但大部分位置永远用不到，训练效率低。
 
 使用时：对当前局面的**非法着法做 mask**（把 logits 设为 -∞）再 softmax。做了视角翻转的话，着法编号也要按同样方式翻转。
 
 #### 训练与部署要点
 
 - **数据增强**：棋盘左右对称，左右镜像后数据量 ×2。
-- **数据来源**：① 用户在本平台的对局（需同意）；② Pikafish 低节点数自对弈生成；③ 公开棋谱库（务必确认版权和使用条款）。
-- **模型规模**：浏览器端可用 6–10 个残差块 × 64–128 通道的小网络，导出 ONNX 后用 `onnxruntime-web` 在浏览器里推理。
-- **了解即可**：Pikafish 用的是 **NNUE**（输入是「己方帅的位置 × 棋子种类 × 棋子位置」这种稀疏特征，走一步只需增量更新少数特征，所以 CPU 上极快）。我们不需要自己实现它，直接用引擎即可。
+- **数据来源**：第 5 节的棋谱库（大师对局）、自己的对局、Pikafish 自对弈。
+- **模型规模**：6–10 个残差块 × 64–128 通道的小网络，PyTorch 训练，导出 ONNX，后端用 `onnxruntime` 推理即可（电脑 CPU 足够）。
+- **了解即可**：Pikafish 用的是 **NNUE**，输入是「己方帅的位置 × 棋子种类 × 棋子位置」这类稀疏特征。走一步只需增量更新少数特征，所以在 CPU 上极快。我们不需要自己实现它。
 
-### 3.5 第 4 层：给 LLM 的讲解上下文（AI 提示的关键）
+### 3.5 第 4 层：给大模型的讲解上下文
 
-#### 原则：LLM 只「讲」，不「算」
+#### 原则：大模型只「讲」，不「算」
 
-所有事实——合法着法、最佳着法、分数、对方的反击手段、哪个子没保护——**都先由引擎和规则引擎算好**，作为结构化数据交给 LLM。LLM 的任务只是：挑出最重要的事实，用对方能听懂的话讲清楚，并总结出可迁移的原则。
+所有事实，包括合法着法、最佳着法、分数、对方的反击手段、哪个子没保护，**都先由引擎和规则引擎算好**，以结构化数据交给大模型。大模型只做三件事：挑出最重要的事实，用你能听懂的话讲清楚，总结出以后用得上的原则。这一点对 DeepSeek 这类较便宜的模型尤其重要：它们算棋的能力不比贵的模型强，但「看着事实讲道理」完全够用。
 
 #### 输入由 5 部分组成
 
 1. **文字棋盘**：用中文字符画出的棋盘，红黑用不同的字区分，帮助模型建立空间感。
 2. **棋子清单**：每个子的位置，避免模型自己数格子数错。
-3. **引擎分析**：用户实际走的着法、前 3 名候选着法、各自胜率、主要变化（全部带中文记谱）。
+3. **引擎分析**：实际走的着法、前 3 名候选着法、各自胜率、主要变化（全部带中文记谱）。
 4. **规则引擎提取的战术事实**（这是防止胡说的关键）：
    - 是否将军；哪些子被攻击；哪些子**无根**（被攻击且无保护）；
-   - **用户这步之后对方的最佳应着是什么、吃掉了什么**（直接从引擎主变化取）；
+   - **这步之后对方的最佳应着是什么、吃掉了什么**（直接取自引擎主变化）；
+   - **这步制造的威胁**（见 5.5 节「空着法」技巧）；
    - 子力对比、局面阶段（开局 / 中局 / 残局）。
-5. **用户水平**：决定讲解深浅和用词。
+5. **你的水平**：决定讲解深浅和用词。
 
 #### 完整示例
 
@@ -410,7 +448,7 @@ def encode(fen: str) -> np.ndarray:
 
 ```json
 {
-  "player": { "side": "红方", "level": "入门（约 1200 分）" },
+  "player": { "side": "红方", "level": "入门" },
   "phase": "开局",
   "fen": "rnbakab1r/9/1c4nc1/p1p1p1p1p/9/9/P1P1P1P1P/1C2C4/9/RNBAKABNR w - - 2 2",
   "board_text": [
@@ -450,7 +488,7 @@ def encode(fen: str) -> np.ndarray:
 
 #### Prompt 与输出格式
 
-System Prompt（固定不变，可以利用 prompt caching 降低成本）：
+System Prompt（固定不变，便于各家服务的提示词缓存）：
 
 ```
 你是一位耐心的中国象棋教练，学生的水平在输入的 player.level 中给出。
@@ -460,65 +498,23 @@ System Prompt（固定不变，可以利用 prompt caching 降低成本）：
 2. 先给一句话结论，再解释原因，最后给出一条以后能用上的原则。
 3. 用学生能听懂的话，少用术语；必须用术语时顺便解释。
 4. 讲解不超过 150 字。
+5. 以 JSON 格式输出，字段为 headline、why、better、principle、tags。
 ```
 
-输出用结构化 JSON（Claude API 的 structured outputs 能保证返回的 JSON 符合 schema）：
+输出用 pydantic 定义，两种大模型都按这个结构返回：
 
-```json
-{
-  "headline": "这步炮吃中卒是送子：黑马可以直接把炮吃掉。",
-  "why": "...",
-  "better": "...",
-  "principle": "吃子前先看落点：对方能不能吃回来？我有没有子保护它？",
-  "tags": ["无根子", "贪吃", "开局"]
-}
+```python
+from pydantic import BaseModel
+
+class Explanation(BaseModel):
+    headline: str          # 一句话结论，如「这步炮吃中卒是送子：黑马可以直接把炮吃掉。」
+    why: str               # 原因
+    better: str            # 更好的下法及理由
+    principle: str         # 可迁移的原则，如「吃子前先看落点：对方能不能吃回来？我有没有子保护它？」
+    tags: list[str]        # 如 ["无根子", "贪吃", "开局"]，用于错题本归类和推荐练习
 ```
 
-服务端调用示意（TypeScript，`@anthropic-ai/sdk` + `zod`）：
-
-```ts
-import Anthropic from "@anthropic-ai/sdk";
-import { z } from "zod";
-import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
-
-const Explanation = z.object({
-  headline: z.string(),
-  why: z.string(),
-  better: z.string(),
-  principle: z.string(),
-  tags: z.array(z.string()),
-});
-
-const client = new Anthropic(); // 从环境变量 ANTHROPIC_API_KEY 读取
-
-export async function explain(context: object) {
-  const res = await client.messages.parse({
-    model: "claude-opus-5-5",
-    max_tokens: 2000,
-    system: [{ type: "text", text: COACH_SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
-    messages: [{ role: "user", content: JSON.stringify(context) }],
-    output_config: { format: zodOutputFormat(Explanation), effort: "low" },
-  });
-  return res.parsed_output; // 解析失败时为 null，需要兜底
-}
-```
-
-#### 防止 LLM 胡说：输出校验
-
-1. 用正则提取讲解文本里出现的所有中文着法：
-   ```ts
-   const CN_MOVE = /(?:[前中后][车马炮兵卒相象仕士]|[车马炮相象仕士帅将兵卒][一二三四五六七八九1-9])[进退平][一二三四五六七八九1-9]/g;
-   ```
-2. 每一个都必须在 `allowed_moves_cn` 里，否则重新生成一次；仍不通过则**回落到模板讲解**（例如「这步棋之后对方可以 {opponent_reply}，{facts[0]}」）。
-3. 讲解结果按 `(FEN, 着法, 水平)` 做缓存，同一个错误不重复调用 LLM。
-
-#### 模型选择与成本
-
-- 默认使用 `claude-opus-5-5`，短提示用 `effort: "low"`，整盘复盘报告可以调高 effort。
-- 如果对成本敏感，可以把「一句话提示」换成更便宜的 `claude-sonnet-5-5` 或 `claude-haiku-4-5`，具体由你决定，建议先用真实局面对比讲解质量再换。
-- 只对**关键时刻**（胜率变化超过阈值的步）调用 LLM，普通步只显示评级标签，不调用。
-
-### 3.6 第 5 层：中文记谱（显示和 LLM 共用）
+### 3.6 第 5 层：中文记谱（显示、棋谱导入、大模型共用）
 
 规则：
 - 格式：`棋子 + 起点纵线 + 动作 + 数字`，如「炮二平五」「马8进7」。红方用中文数字，黑方用阿拉伯数字。
@@ -526,118 +522,344 @@ export async function explain(context: object) {
 - 数字：「平」后面是目标纵线；直走子（车、炮、兵、帅）的「进 / 退」后面是**走了几步**；斜走子（马、相、仕）的「进 / 退」后面是**目标纵线**。
 - 同一纵线上有两个同种同色子：用「前 / 后」代替纵线号，如「前车进二」（前 = 更靠近对方）。兵卒在同一纵线上有三个及以上时用「前、中、后」或「一、二、三……」。
 
-```ts
-const RED_NUM = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
-const RED_NAME = ["", "帅", "仕", "相", "马", "车", "炮", "兵"];
-const BLACK_NAME = ["", "将", "士", "象", "马", "车", "炮", "卒"];
-const fileNo = (file: number, red: boolean) => (red ? 9 - file : file + 1);
+```python
+# xiangqi/core/notation.py
+RED_NUM = "零一二三四五六七八九"
+RED_NAME = " 帅仕相马车炮兵"      # 下标 = 棋子类型
+BLACK_NAME = " 将士象马车炮卒"
 
-export function toChinese(board: Int8Array, from: Square, to: Square): string {
-  const p = board[from], red = p > 0, type = Math.abs(p);
-  const num = (n: number) => (red ? RED_NUM[n] : String(n));
-  const [ff, fr, tf, tr] = [fileOf(from), rankOf(from), fileOf(to), rankOf(to)];
+def file_no(f: int, red: bool) -> int:
+    return 9 - f if red else f + 1
 
-  let action: string, target: number;
-  if (fr === tr) {
-    action = "平"; target = fileNo(tf, red);
-  } else {
-    action = (red ? tr > fr : tr < fr) ? "进" : "退";
-    const diagonal = type === PT.Advisor || type === PT.Bishop || type === PT.Knight;
-    target = diagonal ? fileNo(tf, red) : Math.abs(tr - fr);
-  }
-
-  const name = (red ? RED_NAME : BLACK_NAME)[type];
-  const twins = sameFileTwins(board, from); // 同纵线同种同色子，按「靠近对方」排序；兵卒多子另行处理
-  const head = twins.length === 2
-    ? (twins[0] === from ? "前" : "后") + name
-    : name + num(fileNo(ff, red));
-  return head + action + num(target);
-}
+def to_chinese(b: list[int], frm: int, to: int) -> str:
+    p = b[frm]
+    red, t = p > 0, abs(p)
+    num = (lambda n: RED_NUM[n]) if red else str
+    ff, fr, tf, tr = file_of(frm), rank_of(frm), file_of(to), rank_of(to)
+    if fr == tr:
+        action, target = "平", file_no(tf, red)
+    else:
+        action = "进" if (tr > fr) == red else "退"
+        target = file_no(tf, red) if t in (ADVISOR, BISHOP, KNIGHT) else abs(tr - fr)
+    name = (RED_NAME if red else BLACK_NAME)[t]
+    same = [s for s in range(ff, 90, 9) if b[s] == p]        # 同一纵线上的同种同色子
+    if len(same) == 2:                                       # 前 / 后（兵卒 ≥3 个的情况另行处理）
+        front = same[-1] if red else same[0]
+        head = ("前" if frm == front else "后") + name
+    else:
+        head = name + num(file_no(ff, red))
+    return head + action + num(target)
 ```
 
-单元测试用例（均已用原型脚本核对）：
+单元测试用例（均已用原型运行通过）：
 
-| ICCS | 中文 |
+| 局面 | ICCS | 中文 |
+|---|---|---|
+| 初始局面 | `h2e2` | 炮二平五 |
+| 初始局面 | `h9g7` | 马8进7 |
+| 初始局面 | `b0c2` | 马八进七 |
+| 初始局面 | `i0i1` | 车一进一 |
+| 初始局面 | `h0g2` | 马二进三 |
+| 初始局面 | `i9h9` | 车9平8 |
+| 初始局面 | `g3g4` | 兵三进一 |
+| 红车在 i0、i5（同一纵线） | `i5i7` / `i0h0` | 前车进二 / 后车平二 |
+| 黑马在 e6、e7（同一纵线） | `e6d4` / `e7c8` | 前马进4 / 后马退3 |
+
+#### 中文 → ICCS（棋谱导入的关键）
+
+不必单独写解析器：**在当前局面生成全部合法着法，逐个转成中文，和棋谱里的那一步比较**，匹配上的就是它。这样所有特殊情况（前后、蹩腿、多兵）自动正确，而且棋谱里的不合法着法会被立刻发现。
+
+比较前先做**规范化**，因为不同来源的写法五花八门：
+
+| 原文写法 | 统一为 |
 |---|---|
-| `h2e2` | 炮二平五 |
-| `h9g7` | 马8进7 |
-| `b0c2` | 马八进七 |
-| `i0i1` | 车一进一 |
-| `h0g2` | 马二进三 |
-| `i9h9` | 车9平8 |
-| `g3g4` | 兵三进一 |
-
-另需反向解析（中文 → ICCS），用于导入中文棋谱和校验 LLM 输出：在当前局面的合法着法里逐个生成中文记谱，找到匹配的那一个即可，不必单独写解析器。
+| 繁体：車 馬 砲 傌 俥 帥 將 進 | 车 马 炮 马 车 帅 将 进 |
+| 全角数字：１２３ | 123 |
+| 红黑同字：红方写「象、士、卒」，黑方写「相、仕、兵」 | 按走棋方统一 |
+| 黑方用中文数字 / 红方用阿拉伯数字 | 按走棋方统一 |
+| 英文 WXF 记法：`C2.5`、`H8+7`（`.` 平、`+` 进、`-` 退） | 可选支持，转成中文后同样匹配 |
 
 ### 3.7 第 6 层：存储格式
 
 | 用途 | 格式 |
 |---|---|
-| 对局记录 | `{ initialFen, moves: ICCS[], result, meta }`（JSON），可导出 PGN 风格文本（`[Format "ICCS"]`） |
-| 导入 | FEN、PGN（ICCS / 中文记谱）；可选支持 XQF 等常见棋谱文件 |
-| 局面索引 | Zobrist 64 位哈希：错题本去重、开局库查询、讲解缓存的键 |
+| 对局 / 棋谱 | `initial_fen` + ICCS 着法列表 + 元数据（棋手、赛事、日期、结果），存 SQLite |
+| 导出 | PGN 风格文本（`[Format "ICCS"]`），或中文记谱文本 |
+| 局面索引 | Zobrist 64 位哈希：局面检索、错题本去重、讲解缓存的键 |
 
 ### 3.8 各层表示一览
 
 | 用途 | 格式 | 示例 |
 |---|---|---|
-| 规则计算 | `Int8Array(90)` + 走棋方 + 历史哈希 | `board[85] = -1`（黑将在 e9） |
+| 规则计算 | `list[int]`（长度 90）+ 走棋方 + 历史哈希 | `board[85] = -1`（黑将在 e9） |
 | 引擎通信 | FEN + ICCS | `position fen ... moves h2e2 h9g7` |
 | 神经网络 | `float32[14, 10, 9]` + 2062 维策略 | 见 3.4 |
-| LLM | JSON：文字棋盘 + 事实 + 候选着法（中文） | 见 3.5 |
-| 用户界面 | 中文记谱 + 箭头 / 高亮 | 炮二平五 |
-| 存储 | 初始 FEN + ICCS 着法列表 | `{"moves":["h2e2","h9g7"]}` |
+| 大模型 | JSON：文字棋盘 + 事实 + 候选着法（中文） | 见 3.5 |
+| 界面显示 | 中文记谱 + 箭头 / 高亮 | 炮二平五 |
+| 存储 | 初始 FEN + ICCS 着法列表 | `["h2e2", "h9g7"]` |
 
 ---
 
-## 4. AI 提示系统
+## 4. 大模型适配层（OpenAI 兼容 / Claude）
 
-### 4.1 对局中的三级渐进提示
+### 4.1 统一接口
 
-不直接给答案，让用户先自己想，这样提示才有学习价值：
+业务代码只认这一个接口，不关心背后是哪家：
+
+```python
+# xiangqi/llm/base.py
+from typing import Protocol, TypeVar
+from pydantic import BaseModel
+
+T = TypeVar("T", bound=BaseModel)
+
+class LLMProvider(Protocol):
+    name: str
+    async def complete_json(self, system: str, user: str, schema: type[T]) -> T: ...
+```
+
+### 4.2 OpenAI 兼容实现（DeepSeek 以及其他兼容服务）
+
+DeepSeek 的接口与 OpenAI 兼容，直接用官方 `openai` SDK，改 `base_url` 即可。同一个实现也能接其他兼容 OpenAI 接口的服务（包括本地部署的模型）。
+
+```python
+# xiangqi/llm/openai_compat.py
+from openai import AsyncOpenAI
+
+class OpenAICompatProvider:
+    name = "openai_compat"
+
+    def __init__(self, base_url: str, api_key: str, model: str, json_mode: bool = True):
+        self.client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        self.model, self.json_mode = model, json_mode
+
+    async def complete_json(self, system: str, user: str, schema: type[T]) -> T:
+        extra = {"response_format": {"type": "json_object"}} if self.json_mode else {}
+        resp = await self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": user}],
+            **extra,
+        )
+        text = resp.choices[0].message.content or ""
+        return schema.model_validate_json(extract_json(text))   # 去掉 ```json 包裹，取第一个 {...}
+```
+
+注意：
+- JSON 模式（`response_format`）通常要求提示词里出现「JSON」字样并给出字段示例，3.5 节的 system prompt 已包含。
+- 部分推理类模型不支持 JSON 模式，在配置里设 `json_mode = false`，靠 `extract_json` + pydantic 校验兜底。
+- 模型名、价格、上下文长度以服务商文档为准，一律写在配置文件里，不写死在代码中。
+
+### 4.3 Claude 实现
+
+```python
+# xiangqi/llm/claude.py
+import anthropic
+
+class ClaudeProvider:
+    name = "claude"
+
+    def __init__(self, api_key: str, model: str = "claude-opus-5-5"):
+        self.client = anthropic.AsyncAnthropic(api_key=api_key)
+        self.model = model
+
+    async def complete_json(self, system: str, user: str, schema: type[T]) -> T:
+        resp = await self.client.messages.parse(
+            model=self.model,
+            max_tokens=2000,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            output_format=schema,        # 结构化输出：返回的 JSON 保证符合 pydantic 模型
+        )
+        if resp.parsed_output is None:
+            raise LLMFormatError(resp.stop_reason)
+        return resp.parsed_output
+```
+
+### 4.4 配置文件
+
+```toml
+# config.toml（API Key 只写环境变量名，Key 本身放在 .env 或系统环境变量里，不进 git）
+[llm]
+provider = "openai_compat"          # "openai_compat" | "claude" | "none"（只用模板讲解）
+
+[llm.openai_compat]
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+model = "deepseek-xxx"              # 按 DeepSeek 文档填写实际模型名
+json_mode = true
+
+[llm.claude]
+api_key_env = "ANTHROPIC_API_KEY"
+model = "claude-opus-5-5"
+
+[engine]
+path = "engines/pikafish"           # Windows 下为 pikafish.exe
+threads = 4
+hash_mb = 256
+```
+
+### 4.5 讲解流水线（与具体模型无关）
+
+```
+构建上下文（3.5 节 JSON）
+   → 查缓存（键 = 局面哈希 + 着法 + 水平 + 模型名），命中直接返回
+   → provider.complete_json(...)
+   → pydantic 校验结构
+   → 着法白名单校验：用正则找出文本里的所有中文着法，必须都在 allowed_moves_cn 中
+   → 不通过：把错误原因告诉模型，重试 1 次
+   → 仍不通过 / 网络错误 / 没配 Key：使用模板讲解
+   → 写入缓存
+```
+
+中文着法正则：
+
+```python
+CN_MOVE = re.compile(
+    r"(?:[前中后][车马炮兵卒相象仕士]|[车马炮相象仕士帅将兵卒][一二三四五六七八九1-9])"
+    r"[进退平][一二三四五六七八九1-9]"
+)
+```
+
+模板讲解示例（不调用大模型时使用）：「这步之后对方可以 {opponent_reply.cn}，{facts[0]}。更好的是 {engine_best[0].cn}。」这样即使完全离线，提示和复盘功能也能用，只是讲解没那么自然。
+
+### 4.6 换模型前先评测
+
+固定 30 个有代表性的局面（开局漏着、中局战术、残局技巧各 10 个）作为评测集。每换一个模型或改一次提示词，就跑一遍并记录：
+- **编造着法次数**：自动统计，必须为 0；
+- **讲解是否正确、是否易懂**：自己人工打 1–5 分；
+- 平均耗时和费用。
+
+### 4.7 控制费用
+
+- 只对**关键时刻**（胜率变化超过阈值的步）调用大模型，普通步只显示评级标签。
+- 每次讲解的输入约 1–2k token、输出约 300 token。
+- 名局解读、复盘这类不着急的任务放到后台批量处理，结果存库，同一盘棋只解读一次。
+- 讲解按局面缓存：同一个错误重复犯，不会重复花钱。
+
+---
+
+## 5. 棋谱模块
+
+### 5.1 支持的格式
+
+| 格式 | 说明 | 计划 |
+|---|---|---|
+| PGN（ICCS 坐标） | `[Format "ICCS"]`，着法如 `1. H2-E2 H9-G7` | M3 |
+| PGN / 纯文本（中文记谱） | `1. 炮二平五 马8进7`，网上最常见 | M3 |
+| FEN 局面 | 题目、残局、某个局面 | M3 |
+| DhtmlXQ（东萍象棋网的网页棋谱格式） | 文本格式，着法为数字坐标串 | M6（实现时对照真实样例确认坐标方向） |
+| XQF（象棋演播室） | 二进制格式，有多个版本，部分版本带简单加密 | M6 |
+
+### 5.2 导入流水线
+
+```
+读取文件 → 识别格式 → 解析出元数据 + 初始局面 + 着法序列
+   → 用规则引擎逐步回放校验（任一步不合法：记录错误，截断或跳过该局）
+   → 转成 ICCS 存库（按「初始局面 + 着法序列」的哈希去重）
+   → 为每一步建立局面索引（Zobrist 哈希 → 对局 ID + 步数）
+   → 识别开局名称（比对开局局面表）
+   → （可选）加入后台队列，用引擎分析整盘
+   → 输出导入报告：成功 N 局，失败 M 局及原因
+```
+
+### 5.3 棋谱库：浏览、打谱、局面统计
+
+- **搜索**：按棋手、赛事、年份、结果、开局名称；也可以**按局面搜索**，例如「当前局面在库里出现过的所有对局」。
+- **打谱**：前进 / 后退 / 跳转（键盘 ← → 键），旁边有引擎评估条和胜率曲线；可以在任意一步**试走**自己的着法，生成分支变化，不改动原谱。
+- **局面统计（开局浏览器）**：当前局面下，库中各后续着法的出现次数、红胜 / 和 / 黑胜比例，再加上引擎评分。例如「这里大师们 60% 走马二进三，红方胜率 54%」。
+
+### 5.4 猜着练习（打谱训练的核心）
+
+选一盘大师对局和自己执的一方，系统逐步走对方的着法，轮到你时先自己想、走出你认为最好的一步，然后系统揭晓大师的着法并打分：
+
+| 情况 | 得分 |
+|---|---|
+| 和大师着法相同 | 3 |
+| 不同，但引擎认为不差于大师着法 | 3（显示「你找到了同样好的着法」） |
+| 比大师着法差 ≤ 3% 胜率 | 2 |
+| 差 3–10% | 1 |
+| 差 > 10% | 0，附讲解：为什么大师这样走，你的着法问题在哪 |
+
+细节：
+- 大师着法不一定是引擎最佳。若大师着法明显劣于引擎最佳，就标注「此处大师着法也非最佳」，你若走出了更好的着法不扣分。
+- 开局前若干步可以跳过（或只在开局训练里练），把时间花在中局和残局。
+- 一盘结束后给出：总分 / 满分、与大师的吻合率、平均胜率损失、失分最多的 3 步（加入错题本）。
+
+### 5.5 名局 AI 解读（让 AI 推断着法意图）
+
+1. **引擎整盘分析**：得到胜率曲线，找出转折点（胜率变化最大的几步）。
+2. **对每个关键着法推断意图**，给大模型准备三类事实：
+   - **威胁检测（空着法技巧）**：假设对方「停一步不走」，看走棋方下一步最想走什么。这就是这步棋制造的威胁。实现方法是把 FEN 里的走棋方翻转后交给引擎分析（若此时对方正被将军，局面不合法，跳过这一项）。
+   - **前后特征对比**：哪些子新被攻击、哪些子新受保护，打通了哪条线，子力位置有什么变化。
+   - **引擎主变化**：这步之后双方的最佳延续。
+
+   大模型据此总结「这步棋想干什么」，例如「表面上是兑车，实际是为了打通肋道给马让路」。
+3. **分阶段总结**：开局（开局名称和双方布局思路）、中局（主要计划和转折点）、残局（胜负关键）。
+4. 结果存库，同一盘棋只解读一次，之后打谱时直接显示在对应步上。
+
+### 5.6 从棋谱和自己的对局自动出题
+
+- **出题条件**：某一步的最佳着法胜率比第二名高出 15% 以上（「唯一好棋」）。大师找到了它，可以出题；大师错过了它，也可以出题，答案是引擎着法。
+- **自动标签**：规则引擎判断是否将军、是否吃子、是否弃子、是否几步成杀，据此打上「杀法」「弃子」「捉双」等标签。
+- **难度**：初始按「引擎需要搜多深才能找到这步」估计，之后按你的做题结果用 Glicko-2 调整。
+- 你自己对局中评为「失误」「漏着」的局面，自动进入错题本（见 8.2 节）。
+
+### 5.7 棋谱来源与版权
+
+- 来源：自己收集或购买的棋谱文件、自己的对局、Pikafish 自对弈。
+- 网上公开的棋谱一般只允许个人学习使用。本项目只在本机使用，**不把任何第三方棋谱提交进仓库**：`data/` 目录加入 `.gitignore`，仓库里只放几盘自己构造的示例用于测试。
+
+---
+
+## 6. AI 提示系统
+
+### 6.1 对局中的三级渐进提示
+
+不直接给答案，让你先自己想，这样提示才有学习价值：
 
 | 级别 | 内容 | 数据来源 |
 |---|---|---|
 | L1 方向提示 | 「注意：你有一个子没有保护」「对方有将军的手段」 | 规则引擎特征（不泄露着法） |
 | L2 棋子提示 | 高亮应该走的那个棋子 | 引擎最佳着法的起点 |
-| L3 着法 + 原因 | 画箭头 + 一句话讲解 | 引擎 + LLM |
+| L3 着法 + 原因 | 画箭头 + 一句话讲解 | 引擎 + 大模型（或模板） |
 
-每次使用提示都会记录下来，影响该局的「独立完成度」统计。
+每次使用提示都会被记录，计入该局的「独立完成度」。
 
-### 4.2 着法评级（复盘用）
+### 6.2 着法评级（复盘、猜着共用）
 
 用「走这步之前的胜率 − 走这步之后的胜率」（走棋方视角）来衡量：
 
 | 评级 | 胜率下降 | 说明 |
 |---|---|---|
-| 妙着 | — | 唯一好棋：最佳着法比第二名高出 15% 以上，且用户走出来了 |
+| 妙着 | — | 唯一好棋：最佳着法比第二名高出 15% 以上，且走出来了 |
 | 好棋 | ≤ 2% | |
 | 可以 | 2–5% | |
 | 缓着 | 5–10% | |
 | 失误 | 10–20% | |
 | 漏着 | > 20% | |
 
-以上阈值是初始值，上线后根据用户反馈调整。
+阈值是初始值，用一段时间后按自己的感受调整。
 
-### 4.3 复盘报告
+### 6.3 复盘报告
 
-- 胜率曲线（横轴步数，纵轴红方胜率），失误点标红，点击跳转到该局面。
+- 胜率曲线：失误点标红，点击跳到该局面。
 - 准确率：平均每步胜率损失换算成 0–100 分。
 - 分阶段表现：开局 / 中局 / 残局各自的准确率。
-- 3 个关键时刻：胜率变化最大的步，每个配 LLM 讲解 + 「再试一次」按钮（从该局面重新走）。
-- 推荐练习：根据本局错误的标签（如「无根子」「漏看马的攻击」）从题库推荐题目。
+- 3 个关键时刻：每个都配讲解，并带「再试一次」按钮（从该局面重新走）。
+- 推荐练习：按本局错误的标签（如「无根子」「漏看马的攻击」）推荐题目。
 
 ---
 
-## 5. 人机对战难度
+## 7. 人机对战难度
 
 引擎最强水平远超人类，难度设计的关键是**让它犯「像人一样」的错误**，而不是突然走出离谱的着法。
 
 强度控制手段（可组合使用）：
 1. **限制搜索量**：节点数 / 深度 / 时间。简单，但低级别时表现不自然。
-2. **引擎自带的强度选项**：如果引擎支持 Skill Level / UCI_LimitStrength 之类的选项就直接用（以实际引擎版本为准）。
-3. **候选着法加温度随机**：用 MultiPV = N 拿到前 N 个候选和胜率，按 `softmax(胜率 / T)` 随机选择，T 越大越弱；再按级别设置「看不见对方威胁」的概率。
-4. **（进阶）人类风格网络**：见 3.4，按棋力段模仿人类着法。
+2. **引擎自带的强度选项**：引擎若支持 Skill Level / UCI_LimitStrength 之类的选项就直接用（以实际版本为准）。
+3. **候选着法加温度随机**：用 MultiPV = N 拿到前 N 个候选着法和胜率，按 `softmax(胜率 / T)` 随机选择，T 越大越弱；再按级别设置「看不见对方威胁」的概率。
+4. **（可选）大师风格网络**：见 3.4 节，按棋力段模仿人类着法。
 
 初始参数示例（需实测调整）：
 
@@ -649,141 +871,171 @@ export function toChinese(board: Int8Array, from: Square, to: Square): string {
 | 7 | 200k | 3 | 0.02 | 业余中级 |
 | 10 | 不限（按时间） | 1 | 0 | 全力 |
 
-**自适应难度**：为用户维护一个棋力分（Elo / Glicko-2），每个 AI 级别也有对应分数，系统推荐让用户胜率在 40–60% 之间的级别。
+**自适应难度**：为你维护一个个人棋力分（Glicko-2），每个 AI 级别也有对应分数，系统推荐让你胜率在 40–60% 之间的级别。
 
 ---
 
-## 6. 自学模块
+## 8. 自学模块
 
-### 6.1 杀法与战术题库
-- 题目格式：`{ fen, solution: ICCS[], tags: [], rating, source }`。
+### 8.1 杀法与战术题库
+- 题目格式：`{ fen, solution: ICCS[], tags, rating, source }`。
 - 主题：马后炮、卧槽马、双车错、铁门栓、重炮、闷宫、白脸将、天地炮等经典杀法，以及捉双、抽将、牵制等战术。
-- **自动出题**：从对局（用户的和自对弈的）中找「唯一胜着」局面，即最佳着法比第二名高出很多，并且后续变化能收束成杀或明显得子。
-- 题目难度分用 Glicko-2：用户做对，用户分上升、题目分下降，反之亦然。
+- 题目主要来自 5.6 节的自动出题，也可以手动录入。
 
-### 6.2 错题本 + 间隔重复
-- 复盘中评级为「失误」「漏着」的局面自动加入错题本（存 FEN + 正确着法 + 讲解）。
-- 用 FSRS（或较简单的 SM-2）算法安排复习时间：做对了间隔变长，做错了很快再出。
-- 首页每天推送「今日复习 N 题」。
+### 8.2 错题本 + 间隔重复
+- 复盘、猜着中失分的局面自动加入错题本（存 FEN + 正确着法 + 讲解）。
+- 用 FSRS（或更简单的 SM-2）算法安排复习时间：做对了间隔变长，做错了很快再出。
+- 首页显示「今日复习 N 题」。
 
-### 6.3 开局训练
-- 开局树：每个节点 = 局面哈希，边 = 着法，附带名称（中炮对屏风马、中炮对反宫马、飞相局、仙人指路、起马局、顺炮、列炮……）和引擎评分。
-- 跟练模式：系统走一方，用户需走出主流着法，偏离时提示并解释该开局的意图。
+### 8.3 开局训练
+- 开局树来自棋谱库统计（5.3 节）加上引擎评分，并标注名称：中炮对屏风马、中炮对反宫马、飞相局、仙人指路、起马局、顺炮、列炮……
+- 跟练模式：系统走一方，你需走出主流着法，偏离时提示并解释该开局的意图。
 
-### 6.4 残局训练
-- 给定实用残局局面，用户和全力引擎对下，要求在规定步数内取胜或守和；失败后可看引擎正确走法。
+### 8.4 残局训练
+- 给定实用残局局面，和全力引擎对下，要求在规定步数内取胜或守和；失败后可看引擎的正确走法。
 
-### 6.5 学习画像
-- 棋力分曲线（人机 + 做题）。
+### 8.5 学习画像
+- 棋力分曲线（人机对战 + 做题 + 猜着）。
 - 各主题正确率雷达图（杀法、防守、开局、残局、子力判断……）。
 - 弱项推荐：正确率最低的主题优先出题。
 
 ---
 
-## 7. 技术选型与项目结构
+## 9. 技术选型与项目结构
 
-### 7.1 选型
+### 9.1 选型
 
-| 层 | 选型 | 理由 |
+| 层 | 选型 | 说明 |
 |---|---|---|
-| 前端 | React + TypeScript + Vite | 生态成熟 |
-| 状态管理 | Zustand | 轻量 |
-| 棋盘渲染 | SVG | 矢量缩放清晰，易做动画、箭头、高亮，手机上也清楚 |
-| 图表 | ECharts 或 Recharts | 胜率曲线、雷达图 |
-| 浏览器引擎 | Fairy-Stockfish WASM（支持 xiangqi，有现成 npm 包）| 免编译即可用；后续可尝试自行用 Emscripten 编译 Pikafish 并实测 |
-| 服务端引擎 | Pikafish 原生二进制 | 目前最强的开源象棋引擎之一 |
-| 后端 | Node.js + Fastify + TypeScript | 和前端共用 `packages/core`（规则、记谱、校验只写一份） |
-| 任务队列 | MVP 用进程内队列；量大后换 BullMQ + Redis | 整盘复盘分析是耗时任务 |
-| 数据库 | MVP 用 SQLite，上线换 PostgreSQL（Drizzle 或 Prisma） | |
-| LLM | Claude API（`@anthropic-ai/sdk`） | 中文讲解质量好，支持结构化输出、prompt caching |
-| 训练（可选） | Python + PyTorch，导出 ONNX → `onnxruntime-web` | 仅第 3.4 节需要 |
+| 语言 | Python ≥ 3.11 | |
+| 依赖管理 | uv（或 pip + venv） | `uv run xiangqi` 一条命令启动 |
+| 后端框架 | FastAPI + uvicorn | 原生支持 async 和 WebSocket |
+| 数据校验 | pydantic v2 | API 数据和大模型输出共用 |
+| 数据库 | SQLite + SQLModel（或 SQLAlchemy 2.0） | 单文件，备份就是复制文件 |
+| 测试 / 代码风格 | pytest / ruff | |
+| 大模型 SDK | `openai`（OpenAI 兼容）、`anthropic`（Claude） | 两个 SDK 的调用方式已核对 |
+| 象棋引擎 | Pikafish 原生可执行文件 + NNUE 权重 | 从官方 GitHub Releases 下载，按 CPU 支持的指令集选版本 |
+| 前端 | React + TypeScript + Vite，SVG 棋盘，ECharts | Node.js 只在开发和构建时需要，运行时不需要 |
+| 可选训练 | PyTorch → ONNX → onnxruntime | 仅 3.4 节需要 |
 
-**WASM 多线程注意**：多线程 WASM 依赖 `SharedArrayBuffer`，页面必须返回以下响应头，否则只能单线程：
-
-```
-Cross-Origin-Opener-Policy: same-origin
-Cross-Origin-Embedder-Policy: require-corp
-```
-
-### 7.2 目录结构（pnpm monorepo）
+### 9.2 目录结构
 
 ```
 game/
-├── packages/
-│   ├── core/          # 规则引擎、FEN、ICCS、中文记谱、Zobrist、战术特征提取（纯 TS，零依赖）
-│   └── engine/        # EngineAdapter、UCI 解析、Pikafish 进程池、WASM Worker 封装
-├── apps/
-│   ├── web/           # React 前端
-│   └── server/        # Fastify API、讲解服务、分析队列
-├── data/
-│   ├── openings/      # 开局树 JSON
-│   └── puzzles/       # 题库 JSON
-├── ml/                # （可选）Python 训练管线
+├── backend/
+│   ├── pyproject.toml
+│   ├── xiangqi/
+│   │   ├── core/            # 规则引擎（纯 Python，无第三方依赖）
+│   │   │   ├── board.py         # 坐标、棋子编码、Position、预计算表
+│   │   │   ├── movegen.py       # 着法生成、将军检测、合法着法
+│   │   │   ├── rules.py         # 胜负、重复局面、长将
+│   │   │   ├── fen.py           # FEN 读写
+│   │   │   ├── notation.py      # ICCS ↔ 中文记谱、写法规范化
+│   │   │   ├── zobrist.py       # 局面哈希
+│   │   │   └── features.py      # 战术特征：无根子、威胁、子力对比
+│   │   ├── engine/          # UCI 适配、Pikafish 进程管理、难度控制
+│   │   ├── llm/             # base.py、openai_compat.py、claude.py、templates.py、validate.py、prompts/
+│   │   ├── games/           # 棋谱解析（pgn / 中文文本 / dhtmlxq / xqf）、导入、索引、开局识别
+│   │   ├── training/        # 复盘、猜着、题库、错题本（FSRS）、棋力分
+│   │   ├── api/             # FastAPI 路由与 WebSocket
+│   │   ├── db/              # 数据表定义
+│   │   └── __main__.py      # 启动入口：起服务 + 打开浏览器
+│   └── tests/               # perft、将军检测、记谱、棋谱解析
+├── frontend/                # React 界面（构建产物由后端提供）
+├── engines/                 # Pikafish 可执行文件和权重（.gitignore）
+├── data/                    # 数据库、导入的棋谱（.gitignore）
+├── config.toml
 └── docs/
     └── xiangqi-plan.md
 ```
 
-### 7.3 API 草案
+### 9.3 API 草案
+
+每次局面变化都返回统一的 `PositionView`：
+
+```json
+{
+  "fen": "rnbakab1r/9/1c4nc1/p1p1p1p1p/9/9/P1P1P1P1P/1C2C4/9/RNBAKABNR w - - 2 2",
+  "turn": "red",
+  "legal_moves": ["h0g2", "b0c2", "e2e6", "..."],
+  "last_move": "h9g7",
+  "in_check": false,
+  "result": null,
+  "moves_cn": ["炮二平五", "马8进7"]
+}
+```
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/analyse` | `{fen, moves?, multiPV?, depth?}` → 候选着法（ICCS + 中文 + 胜率 + 主变） |
-| POST | `/api/explain` | `{fen, move, level}` → 讲解 JSON（带缓存） |
-| POST | `/api/games` | 保存对局 |
-| POST | `/api/games/:id/review` | 发起整盘复盘（异步任务） |
-| GET | `/api/games/:id/review` | 获取复盘结果 |
-| GET | `/api/puzzles/next?theme=` | 按用户水平取下一题 |
-| POST | `/api/puzzles/:id/attempt` | 提交答案，更新分数 |
-| GET | `/api/review-queue` | 今日错题复习列表 |
+| POST | `/api/games` | 新建对局 `{mode: "vs_ai" \| "free", ai_level, user_side, fen?}` |
+| POST | `/api/games/{id}/move` | `{move: "h2e2"}` → `PositionView` |
+| POST | `/api/games/{id}/ai-move` | AI 走一步 → `{move, position}` |
+| POST | `/api/games/{id}/undo` | 悔棋 |
+| POST | `/api/games/{id}/hint` | `{level: 1 \| 2 \| 3}` → 提示 |
+| POST | `/api/games/{id}/review` | 发起复盘（后台任务） |
+| WS | `/ws/analysis` | 发送 `{fen, moves}`，持续收到 `AnalysisLine` |
+| POST | `/api/library/import` | 上传棋谱文件 → 导入报告 |
+| GET | `/api/library/games` | 搜索：`?player=&event=&opening=&fen=` |
+| GET | `/api/library/games/{id}` | 对局详情（含解读） |
+| GET | `/api/library/explorer` | `?fen=` → 局面统计 |
+| POST | `/api/library/games/{id}/annotate` | AI 解读（后台任务） |
+| POST | `/api/guess` | 开始猜着 `{game_id, side}` |
+| POST | `/api/guess/{id}/answer` | `{move}` → 得分、大师着法、讲解 |
+| GET | `/api/puzzles/next` | `?theme=` → 下一题 |
+| POST | `/api/puzzles/{id}/attempt` | 提交答案 |
+| GET | `/api/review-queue` | 今日待复习 |
 
-### 7.4 数据表
+### 9.4 数据表（SQLite）
 
 ```
-users            (id, name, rating, created_at)
-games            (id, user_id, initial_fen, moves[], result, ai_level, user_side, created_at)
-move_analysis    (game_id, ply, fen, move, best_move, win_before, win_after, grade, pv[])
-explanations     (cache_key, fen, move, level, content_json, model, created_at)
-puzzles          (id, fen, solution[], tags[], rating, source)
-user_cards       (user_id, card_id, card_type[puzzle|mistake], stability, difficulty, due_at, reps, lapses)
-opening_nodes    (zobrist, move, name, eval_cp, games_count)
+games          (id, kind[library|my_game], event, date, red, black, result, opening,
+                initial_fen, moves_iccs, source_file, content_hash UNIQUE, created_at)
+position_index (zobrist, game_id, ply)                 -- 局面出现在哪些对局的第几步
+move_analysis  (game_id, ply, fen, move, best_move, win_before, win_after, grade, pv)
+annotations    (game_id, ply, kind[intent|summary|mistake], content_json, provider, model)
+explain_cache  (cache_key PRIMARY KEY, content_json, provider, model, created_at)
+puzzles        (id, fen, solution, tags, rating, source_game_id, source_ply)
+cards          (id, kind[puzzle|mistake], ref_id, stability, difficulty, due_at, reps, lapses)
+guess_sessions (id, game_id, side, current_ply, score, max_score, started_at)
+guess_answers  (session_id, ply, user_move, master_move, points, win_loss)
+kv             (key PRIMARY KEY, value)                -- 个人棋力分、偏好设置等
 ```
 
 ---
 
-## 8. 里程碑（按 1 人开发估算）
+## 10. 里程碑（1 人开发估算）
 
 | 阶段 | 时长 | 交付 | 验收标准 |
 |---|---|---|---|
-| M0 骨架 | 1 周 | monorepo、坐标约定、FEN 读写、棋盘 SVG 静态展示 | FEN 往返转换一致 |
-| M1 规则 | 2 周 | 着法生成、合法性、胜负判定、中文记谱、本地双人对弈 | perft 1–4 全部通过；记谱测试通过 |
-| M2 人机 | 2 周 | WASM 引擎 Worker、人机对战、10 个难度、L2/L3 提示（箭头） | 手机浏览器上流畅对局 |
-| M3 复盘 | 2–3 周 | 服务端 Pikafish、整盘分析、胜率曲线、着法评级 | 一盘 60 步的棋 30 秒内出复盘 |
-| M4 讲解 | 2 周 | 特征提取、Prompt、结构化输出、校验、缓存、L1 方向提示 | 抽查 50 条讲解，无编造着法 |
-| M5 自学 | 3 周 | 题库、错题本 + 间隔重复、开局跟练、学习画像 | 完整「下棋 → 复盘 → 错题 → 复习」闭环 |
-| M6 可选 | 4 周+ | 人类风格网络：张量编码、训练、ONNX 浏览器推理 | 低级别 AI 的着法与同水平人类着法吻合率可量化 |
+| M0 骨架 | 1 周 | uv 项目、FastAPI、Vite 前端、配置文件、Position / FEN、棋盘静态显示 | FEN 读写往返一致 |
+| M1 规则引擎 | 2 周 | 着法生成、将军检测、胜负、Zobrist、重复 / 长将、中文记谱（双向）、本地摆棋走棋 | perft 1–4 通过；将军检测和记谱测试全部通过 |
+| M2 人机对战 | 1–2 周 | Pikafish 接入、对弈、10 级难度、悔棋、L2 / L3 提示、实时评估条 | 能和 AI 完整下完一盘 |
+| M3 棋谱库 | 2 周 | PGN / 中文文本导入、回放校验、局面索引、浏览搜索、打谱、试走、局面统计 | 导入 1000 盘棋不崩溃，失败对局有原因报告 |
+| M4 讲解 + 复盘 | 2 周 | LLMProvider 两种实现、上下文构建、校验、模板兜底、缓存、整盘复盘报告、L1 提示 | 30 局面评测集上编造着法 0 次 |
+| M5 棋谱训练 | 2 周 | 猜着练习、名局 AI 解读、自动出题、错题本 | 「打谱 → 猜着 → 错题 → 复习」闭环跑通 |
+| M6 扩展 | 2 周 | DhtmlXQ / XQF 导入、开局跟练、残局训练、学习画像 | |
+| M7 可选 | 4 周+ | 大师风格神经网络：张量编码、训练、推理 | 着法预测吻合率可量化 |
 
 ---
 
-## 9. 风险与对策
+## 11. 风险与对策
 
 | 风险 | 对策 |
 |---|---|
-| 规则细节复杂（长将、长捉） | MVP 实现长将判负 + 重复判和；长捉逐步完善；用大量特殊局面做回归测试 |
-| LLM 编造着法或看错局面 | 只讲不算；事实全部预先算好；输出正则校验；失败回落到模板讲解 |
-| 引擎太强，低级别不自然 | 候选着法加温度随机 + 级别化「漏看」；后续用人类风格网络 |
-| WASM 在手机上慢或内存不足 | 单线程降级、减小 Hash；提示和复盘可走服务端兜底 |
-| **许可证**：Pikafish、Fairy-Stockfish 均为 GPL-3.0 | 服务端以独立进程调用；若在浏览器分发 WASM，等同于分发二进制，需随附许可证并提供对应源码 |
-| 棋谱版权 | 优先使用自对弈数据和用户授权的对局；第三方棋谱库先确认条款 |
-| LLM 成本 | 只讲关键步；按 (FEN, 着法, 水平) 缓存；固定 system prompt 使用 prompt caching；短提示用低 effort |
+| Python 规则引擎速度 | 预计算表（已实测 perft(4) 约 10 秒）；搜索交给引擎；批量导入放后台任务；真有瓶颈再针对热点优化 |
+| 棋谱格式杂乱、写法不统一 | 先支持最常见的两种；用规范化表统一写法；每种格式用真实样例文件做回归测试；导入报告列出失败原因 |
+| 便宜模型更容易胡说 | 只讲不算；事实预先算好；着法白名单校验 + 重试 + 模板兜底；用评测集比较不同模型 |
+| 规则细节（长将、长捉） | MVP 实现长将判负 + 其他重复判和；长捉逐步完善；用特殊局面做回归测试 |
+| 引擎太强，低级别不自然 | 候选着法加温度随机 + 按级别「漏看」威胁；之后可用大师风格网络 |
+| API Key 泄露 | Key 只放环境变量或本地 `.env`，`.env` 加入 `.gitignore` |
+| 棋谱版权 | 仅本机个人使用，不提交、不分发第三方棋谱 |
 
 ---
 
-## 10. 需要你确认的问题
+## 12. 还需要确认的问题
 
-1. **使用范围**：只给自己用（单机、无账号），还是要做成多用户网站？这决定 M0 是否需要账号系统和数据库。
-2. **设备优先级**：主要在电脑还是手机上用？手机优先的话棋盘交互和 WASM 性能要优先打磨。
-3. **后端语言**：方案默认 Node.js（和前端共用规则代码）。如果你更熟悉 Python，也可以用 FastAPI，但规则引擎要在 Python 再实现一份或者编译成共用模块。
-4. **LLM 预算**：是否已有 Claude API Key？每月大概能接受多少调用费用？这决定讲解的覆盖范围（只讲漏着，还是每个关键步都讲）。
-5. **是否需要人人联网对战**：本方案暂不包含，如需要可在 M5 之后加入。
+1. **手上有没有现成的棋谱文件？是什么格式？**（PGN、XQF、东萍 DhtmlXQ、纯文本中文记谱……）这决定 M3 先写哪个解析器。可以把一两个样例文件放进仓库外的 `data/` 目录给我看格式。
+2. **前端用 React 可以吗？** 需要在电脑上装 Node.js，用于开发和构建；运行时只需要 Python。
+3. **Python 版本**：方案按 3.11 及以上设计，可以吗？
 
-确认后从 M0 / M1 开始实现：先把 `packages/core`（规则引擎 + 记谱 + perft 测试）做扎实，后面所有功能都依赖它。
+确认后从 M0 / M1 开始实现：先把 `xiangqi/core`（规则引擎 + 记谱 + perft 测试）做扎实，后面所有功能都依赖它。
