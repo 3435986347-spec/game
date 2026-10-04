@@ -28,6 +28,11 @@
 > - 数据库用 SQLite（WAL 模式，每个线程一个连接）；导入在后台线程进行，导入期间可以照常查询。对局 id 不复用，删掉的对局，旧链接不会指到别的对局。
 > - 局面统计只看库里的对局，不调用引擎；打谱页可以另外打开引擎实时分析。
 > - 与 5.3 节的差别：「试走」是在对弈页从这一步新开一局（可以自己走双方，也可以和 AI 下），不在打谱页里生成分支；胜率曲线放到 M4 复盘时做。
+>
+> **M4 准备中（2026-10-04，尚未写代码）**：范围按 1038 行的里程碑表：LLMProvider 两种实现（OpenAI 兼容 / Claude）+ 只用模板的 none、3.5 节的讲解上下文（文字棋盘、棋子清单、引擎候选、规则引擎提取的战术事实）、着法白名单校验 + 重试 1 次 + 模板兜底、按局面缓存、整盘复盘报告（6.2 评级、6.3 胜率曲线 / 准确率 / 关键时刻 /「再试一次」）、L1 方向提示、30 局面评测脚本。已确认的实现细节：
+> - 复盘以棋谱库中的对局为单位（自己的对局先自动保存），结果存库；整盘分析作为后台任务，进度轮询方式与导入相同。
+> - Claude 适配用官方 `anthropic` SDK：`client.messages.parse(model=..., max_tokens=..., system=..., messages=[...], output_format=Explanation)`，读 `parsed_output`；先检查 `stop_reason == "refusal"`。默认模型 `claude-opus-5-5`（思考不能关闭，用 `output_config={"effort": ...}` 控制，默认 medium，要显式设置）。拒答时的服务端回退：`client.beta.messages` 加 `betas=["server-side-fallback-2026-07-01"]`、`fallbacks="default"`。实现前先在已安装的 SDK 里核对这些参数名。
+> - OpenAI 兼容适配放在单独的文件里，用 `openai` SDK + JSON 模式，pydantic 校验兜底。
 
 ---
 
