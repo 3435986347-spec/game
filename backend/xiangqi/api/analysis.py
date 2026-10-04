@@ -1,7 +1,8 @@
 """引擎状态与实时分析（评估条）。
 
 实时分析通过 WebSocket /ws/analysis 进行：
-- 客户端发送 {"type": "start", "game_id": "...", "multipv": 3} 开始分析该对局的当前局面；
+- 客户端发送 {"type": "start", "game_id": "...", "multipv": 3} 开始分析该对局的当前局面，
+  或 {"type": "start", "fen": "...", "moves": [...], "multipv": 3} 分析任意局面（如打谱时）；
   再次发送 start 会停止上一次分析、开始新的；发送 {"type": "stop"} 停止。
 - 服务端推送 {"type": "info", "game_id", "ply", "fen", "depth", "lines": [...]}，
   每条 line 含 move、cn（中文）、pv_cn、red_win（红方期望得分 0..1）、score_cp / mate（红方视角）。
@@ -15,10 +16,11 @@ import asyncio
 import contextlib
 import logging
 from contextlib import aclosing
+from dataclasses import dataclass
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
-from ..core import RED, Position
+from ..core import RED, FenError, NotationError, Position, parse_iccs
 from ..engine import LEVELS, EngineError, EngineService, EngineUnavailable, InfoLine
 from .games import Game, pv_to_chinese, red_expected
 from .schemas import EngineStatusView, LevelView
@@ -49,13 +51,14 @@ async def analysis_socket(ws: WebSocket) -> None:
             task = None
             kind = message.get("type") if isinstance(message, dict) else None
             if kind == "start":
-                game: Game | None = app.state.games.get(message.get("game_id"))
-                if game is None:
-                    await ws.send_json({"type": "error", "message": "对局不存在"})
+                try:
+                    target = _target(app, message)
+                except ValueError as e:
+                    await ws.send_json({"type": "error", "message": str(e)})
                     continue
                 multipv = max(1, min(int(message.get("multipv", 3)), 5))
                 await _preempt_other(app, ws)
-                task = asyncio.create_task(_stream(ws, app.state.engines, game, multipv))
+                task = asyncio.create_task(_stream(ws, app.state.engines, target, multipv))
                 app.state.analysis_task, app.state.analysis_socket = task, ws
             elif kind == "stop":
                 await ws.send_json({"type": "stopped"})
@@ -86,10 +89,46 @@ async def _cancel(task: asyncio.Task[None] | None) -> None:
         await task
 
 
-async def _stream(ws: WebSocket, engines: EngineService, game: Game, multipv: int) -> None:
-    # 记下请求时的局面；之后对局再变化，客户端会发来新的 start
-    initial_fen, moves, ply = game.initial_fen, game.move_list, len(game.records)
-    position = game.position.copy()
+@dataclass(frozen=True)
+class _Target:
+    """要分析的局面：起始局面 + 着法（保留历史，引擎才能判断重复局面）。"""
+
+    game_id: str | None
+    initial_fen: str
+    moves: list[str]
+    position: Position  # 走完 moves 之后的局面
+
+
+def _target(app, message: dict) -> _Target:
+    """start 消息里的分析对象：进行中的对局（game_id），或任意局面（fen + moves）。"""
+    if message.get("game_id") is not None:
+        game: Game | None = app.state.games.get(message.get("game_id"))
+        if game is None:
+            raise ValueError("对局不存在")
+        # 记下请求时的局面；之后对局再变化，客户端会发来新的 start
+        return _Target(game.id, game.initial_fen, game.move_list, game.position.copy())
+    fen = message.get("fen")
+    if not isinstance(fen, str):
+        raise ValueError("缺少 game_id 或 fen")
+    moves = message.get("moves") or []
+    try:
+        position = Position.from_fen(fen)
+        for text in moves:
+            move = parse_iccs(str(text))
+            if not position.is_legal(move):
+                raise ValueError(f"着法 {text} 不合法")
+            position.push(move)
+    except (FenError, NotationError) as e:
+        raise ValueError(f"局面无效：{e}") from e
+    return _Target(None, Position.from_fen(fen).fen(), [str(m) for m in moves], position)
+
+
+async def _stream(ws: WebSocket, engines: EngineService, target: _Target, multipv: int) -> None:
+    initial_fen, moves, position = target.initial_fen, target.moves, target.position
+    ply = len(moves)
+    if not position.legal_moves():  # 将死或困毙：没有可分析的着法，直接告诉前端
+        await ws.send_json(_info_message(target.game_id, ply, position, []))
+        return
     try:
         engine = await engines.analyser()
         loop = asyncio.get_running_loop()
@@ -101,7 +140,7 @@ async def _stream(ws: WebSocket, engines: EngineService, game: Game, multipv: in
                 elapsed = loop.time() - last_sent
                 if (complete and elapsed >= _MIN_INTERVAL) or elapsed >= _MAX_STALE:
                     last_sent = loop.time()
-                    await ws.send_json(_info_message(game.id, ply, position, lines))
+                    await ws.send_json(_info_message(target.game_id, ply, position, lines))
     except (EngineUnavailable, EngineError) as e:
         await _send_error(ws, str(e))
     except WebSocketDisconnect:
@@ -116,7 +155,7 @@ async def _send_error(ws: WebSocket, message: str) -> None:
         await ws.send_json({"type": "error", "message": message})
 
 
-def _info_message(game_id: str, ply: int, position: Position, lines: list[InfoLine]) -> dict:
+def _info_message(game_id: str | None, ply: int, position: Position, lines: list[InfoLine]) -> dict:
     sign = 1 if position.turn == RED else -1
     out = []
     for line in lines:
@@ -137,6 +176,6 @@ def _info_message(game_id: str, ply: int, position: Position, lines: list[InfoLi
         "game_id": game_id,
         "ply": ply,
         "fen": position.fen(),
-        "depth": lines[0].depth,
+        "depth": lines[0].depth if lines else 0,
         "lines": out,
     }

@@ -16,6 +16,7 @@ from .engine import EngineConfig
 
 # backend/xiangqi/config.py → 仓库根目录
 REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_LIBRARY_DB = REPO_ROOT / "data" / "xiangqi.db"
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,9 @@ class AppConfig:
     static_dir: Path | None = REPO_ROOT / "frontend" / "dist"  # 前端构建产物
     rules: RuleConfig = field(default_factory=RuleConfig)
     engine: EngineConfig | None = None  # 未配置时人机对战、提示、分析不可用
+    # 棋谱库（SQLite）。None 表示只在内存中（测试用）；load_config 默认用 data/xiangqi.db
+    library_db: Path | None = None
+    library_index_plies: int = 40  # 局面索引只记录每局前多少步（半回合）
 
 
 def find_config_file(explicit: str | Path | None = None) -> Path | None:
@@ -42,12 +46,13 @@ def find_config_file(explicit: str | Path | None = None) -> Path | None:
 def load_config(path: str | Path | None = None) -> AppConfig:
     file = find_config_file(path)
     if file is None:
-        return AppConfig()
+        return AppConfig(library_db=DEFAULT_LIBRARY_DB)
     data = tomllib.loads(file.read_text(encoding="utf-8"))
     base = file.resolve().parent
     server = data.get("server", {})
     rules = data.get("rules", {})
     engine = data.get("engine", {})
+    library = data.get("library", {})
     static_dir = server.get("static_dir")
     defaults = AppConfig()
     return AppConfig(
@@ -59,6 +64,8 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             repetition_count=int(rules.get("repetition_count", defaults.rules.repetition_count)),
         ),
         engine=_engine_config(engine, base),
+        library_db=(base / library["db_path"]) if library.get("db_path") else DEFAULT_LIBRARY_DB,
+        library_index_plies=int(library.get("index_plies", defaults.library_index_plies)),
     )
 
 

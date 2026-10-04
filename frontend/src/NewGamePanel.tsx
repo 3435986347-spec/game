@@ -1,31 +1,12 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
 import type { LevelInfo, Mode, NewGameOptions, Side } from "./api";
-
-const SETTINGS_KEY = "xiangqi.newGame";
+import { loadSettings, saveSettings } from "./settings";
 
 const DEFAULT_LEVELS: LevelInfo[] = Array.from({ length: 10 }, (_, i) => ({
   level: i + 1,
   name: "",
 }));
-
-function loadSettings(): Omit<NewGameOptions, "fen"> {
-  try {
-    const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "null");
-    if (saved && (saved.mode === "free" || saved.mode === "vs_ai")) return saved;
-  } catch {
-    // 忽略损坏或不可用的本地存储
-  }
-  return { mode: "vs_ai", user_side: "red", ai_level: 3 };
-}
-
-function saveSettings(settings: Omit<NewGameOptions, "fen">) {
-  try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-  } catch {
-    // 浏览器禁用了本地存储时忽略
-  }
-}
 
 interface NewGamePanelProps {
   engineReady: boolean;

@@ -9,7 +9,9 @@ from fastapi.staticfiles import StaticFiles
 from .. import __version__
 from ..config import AppConfig
 from ..engine import EngineService
+from ..library import Library
 from . import analysis, games
+from . import library as library_api
 
 _NOT_BUILT_HTML = """<!doctype html><meta charset="utf-8"><title>象棋自学</title>
 <p>后端已启动，但前端还没有构建。请运行：</p>
@@ -23,11 +25,13 @@ npm run build</pre>
 def create_app(config: AppConfig | None = None) -> FastAPI:
     config = config or AppConfig()
     engines = EngineService(config.engine)
+    library = Library(config.library_db or ":memory:", index_plies=config.library_index_plies)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         yield
         await engines.close()  # 退出时关闭引擎进程
+        library.close()
 
     app = FastAPI(title="象棋自学", version=__version__, lifespan=lifespan)
     app.state.config = config
@@ -35,8 +39,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.engines = engines
     app.state.analysis_task = None  # 当前正在进行的实时分析（全局只有一个）
     app.state.analysis_socket = None
+    app.state.library = library
+    app.state.import_jobs = {}
     app.include_router(games.router)
     app.include_router(analysis.router)
+    app.include_router(library_api.router)
 
     @app.get("/api/health", tags=["系统"])
     def health() -> dict[str, str]:

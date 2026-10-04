@@ -39,10 +39,14 @@ export interface GameView {
   hints_used: number;
   moves: MoveRecord[];
   position: PositionView;
+  /** 已保存到棋谱库时为棋谱编号 */
+  library_id: number | null;
 }
 
 export interface NewGameOptions {
   fen?: string;
+  /** 从 fen（或标准开局）开始先走这些着法（ICCS），用于从棋谱中的某一步开始 */
+  moves?: string[];
   mode: Mode;
   user_side: Side;
   ai_level: number;
@@ -87,11 +91,124 @@ export interface AnalysisLine {
 
 export interface AnalysisInfo {
   type: "info";
-  game_id: string;
+  /** 分析任意局面（fen + moves）时为 null */
+  game_id: string | null;
   ply: number;
   fen: string;
   depth: number;
   lines: AnalysisLine[];
+}
+
+// ---------- 棋谱库 ----------
+
+export type GameKind = "library" | "my_game";
+export type GameResult = "1-0" | "0-1" | "1/2-1/2" | "*";
+
+export const RESULT_TEXT: Record<GameResult, string> = {
+  "1-0": "红胜",
+  "0-1": "黑胜",
+  "1/2-1/2": "和",
+  "*": "未完",
+};
+
+export interface LibraryStats {
+  games: number;
+  my_games: number;
+  /** 每局只索引前这么多步（局面统计和按局面搜索只看得到这些） */
+  indexed_plies: number;
+}
+
+export interface ImportErrorItem {
+  /** 该局在文件中的序号，从 1 开始 */
+  index: number;
+  title: string;
+  reason: string;
+}
+
+export interface ImportJob {
+  job_id: string;
+  filename: string;
+  done: boolean;
+  games_seen: number;
+  imported: number;
+  duplicates: number;
+  failed: number;
+  /** 最多 100 条 */
+  errors: ImportErrorItem[];
+  /** 整个文件无法导入的原因（如无法读取），否则为 null */
+  error: string | null;
+}
+
+export interface GameSummary {
+  id: number;
+  kind: GameKind;
+  event: string | null;
+  date: string | null;
+  red: string | null;
+  black: string | null;
+  result: GameResult;
+  opening: string | null;
+  ply_count: number;
+  source: string | null;
+}
+
+export interface LibraryMove {
+  iccs: string;
+  cn: string;
+}
+
+export interface GameRecord extends GameSummary {
+  site: string | null;
+  round: string | null;
+  red_team: string | null;
+  black_team: string | null;
+  initial_fen: string;
+  moves: LibraryMove[];
+  /** fens[i]：走了 i 步之后的局面，长度 = moves.length + 1 */
+  fens: string[];
+  /** checks[i]：fens[i] 中走棋方是否被将军 */
+  checks: boolean[];
+}
+
+export interface SearchParams {
+  q?: string;
+  event?: string;
+  opening?: string;
+  result?: GameResult;
+  kind?: GameKind;
+  fen?: string;
+  page?: number;
+  page_size?: number;
+}
+
+export interface SearchResult {
+  total: number;
+  page: number;
+  page_size: number;
+  items: GameSummary[];
+}
+
+export interface ExplorerMove {
+  move: string;
+  cn: string;
+  games: number;
+  red_wins: number;
+  draws: number;
+  black_wins: number;
+}
+
+export interface ExplorerView {
+  fen: string;
+  /** 到达过这个局面的对局数 */
+  games: number;
+  indexed_plies: number;
+  /** 按局数从多到少 */
+  moves: ExplorerMove[];
+}
+
+export interface OpeningInfo {
+  name: string;
+  games: number;
 }
 
 export class ApiError extends Error {
@@ -102,6 +219,10 @@ export class ApiError extends Error {
     super(message);
   }
 }
+
+/** 显示给用户的错误信息：后端的说明，或连不上后端。 */
+export const errorText = (e: unknown) =>
+  e instanceof ApiError ? e.message : "无法连接后端，请确认 Python 服务已启动";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(path, {
@@ -141,7 +262,36 @@ export const api = {
       body: JSON.stringify({ level }),
     }),
   engineStatus: () => request<EngineStatus>("/api/engine"),
+  saveGame: (id: string) =>
+    request<{ library_id: number }>(`/api/games/${id}/save`, { method: "POST" }),
+
+  libraryStats: () => request<LibraryStats>("/api/library/stats"),
+  /** 上传一个棋谱文件，后台导入；用 importJob 查询进度 */
+  importFile: (file: File) =>
+    request<{ job_id: string }>(`/api/library/import?filename=${encodeURIComponent(file.name)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file,
+    }),
+  importJob: (jobId: string) => request<ImportJob>(`/api/library/import/${jobId}`),
+  searchGames: (params: SearchParams) =>
+    request<SearchResult>(`/api/library/games?${queryString(params)}`),
+  libraryGame: (id: number) => request<GameRecord>(`/api/library/games/${id}`),
+  deleteLibraryGame: (id: number) =>
+    request<{ deleted: boolean }>(`/api/library/games/${id}`, { method: "DELETE" }),
+  explorer: (fen: string, signal?: AbortSignal) =>
+    request<ExplorerView>(`/api/library/explorer?fen=${encodeURIComponent(fen)}`, { signal }),
+  openings: () => request<OpeningInfo[]>("/api/library/openings"),
 };
+
+/** 查询参数，空值不发送。 */
+function queryString(params: object): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== "") search.set(key, String(value));
+  }
+  return search.toString();
+}
 
 const FILES = "abcdefghi";
 

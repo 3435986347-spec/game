@@ -2,7 +2,7 @@
 
 from .board import BLACK, RED, Move
 from .fen import START_FEN, FenError, format_fen, parse_fen, validate_board
-from .movegen import in_check, legal_moves, perft, pseudo_legal_moves
+from .movegen import in_check, is_legal_move, legal_moves, perft, pseudo_legal_moves
 from .notation import (
     NotationError,
     chinese_variants,
@@ -30,6 +30,7 @@ __all__ = [
     "format_fen",
     "game_result",
     "in_check",
+    "is_legal_move",
     "legal_moves",
     "move_to_chinese",
     "move_to_iccs",

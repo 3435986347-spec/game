@@ -76,3 +76,23 @@ def test_flying_general_pins_blocker():
 def test_in_check(fen, side, expected):
     board, _ = board_of(fen)
     assert in_check(board, side) is expected
+
+
+def test_is_legal_move_agrees_with_legal_moves():
+    """快速单步检查与完整生成的结果必须一致：随机对局中，逐步核对己方每个子到全部 90 个格子。"""
+    import random
+
+    from xiangqi.core import Position, is_legal_move
+
+    rng = random.Random(3)
+    for _ in range(20):
+        pos = Position.start()
+        for _ in range(120):
+            legal = set(pos.legal_moves())
+            if not legal:
+                break
+            for frm in range(90):
+                if pos.board[frm] * pos.turn > 0:
+                    for to in range(90):
+                        assert is_legal_move(pos.board, pos.turn, (frm, to)) == ((frm, to) in legal)
+            pos.push(rng.choice(sorted(legal)))

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
+import sqlite3
 import uuid
 from dataclasses import dataclass, field
 
@@ -33,6 +35,7 @@ from ..engine import (
     choose_move,
     get_level,
 )
+from ..library import Library, my_game_headers
 from .schemas import (
     GameView,
     HintRequest,
@@ -42,7 +45,10 @@ from .schemas import (
     NewGameRequest,
     PositionView,
     ResultView,
+    SavedGame,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class GameError(Exception):
@@ -60,6 +66,8 @@ class Game:
     ai_level: int | None = None
     records: list[MoveRecord] = field(default_factory=list)
     hints_used: int = 0
+    library_id: int | None = None  # 保存到棋谱库后的 id
+    saved_ply: int | None = None  # 保存时走到第几步（避免重复保存）
     rng: random.Random = field(default_factory=random.Random)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # 同一对局的操作依次执行
     # 提示的分析结果，按「完整着法历史」缓存：同一局面、同一历史才复用
@@ -67,8 +75,20 @@ class Game:
 
     @classmethod
     def create(cls, body: NewGameRequest, rules: RuleConfig) -> Game:
+        """新对局。body.moves 是从起始局面先走的着法（从棋谱某一步开始时保留历史）。"""
         position = Position.from_fen(body.fen) if body.fen else Position.start()
         game = cls(uuid.uuid4().hex[:12], position.fen(), position, rules, mode=body.mode)
+        for ply, text in enumerate(body.moves, start=1):
+            try:
+                move = parse_iccs(text)
+            except NotationError as e:
+                raise GameError(f"第 {ply} 步 {text} 不是 ICCS 着法") from e
+            if not position.is_legal(move):
+                raise GameError(f"第 {ply} 步 {text} 不合法")
+            game.records.append(
+                MoveRecord(iccs=move_to_iccs(move), cn=move_to_chinese(position.board, move))
+            )
+            position.push(move)
         if body.mode == "vs_ai":
             game.ai_side = BLACK if body.user_side == "red" else RED
             game.ai_level = body.ai_level
@@ -131,6 +151,7 @@ class Game:
             ai_level=self.ai_level,
             ai_to_move=self.ai_to_move,
             hints_used=self.hints_used,
+            library_id=self.library_id,
             moves=self.records,
             position=PositionView(
                 fen=pos.fen(),
@@ -142,6 +163,34 @@ class Game:
                 result=result_view,
             ),
         )
+
+
+def save_to_library(game: Game, library: Library) -> int:
+    """把对局保存（或更新）到棋谱库，返回库中的 id。"""
+    result = game.result()
+    code = "*"
+    if result is not None:
+        code = {RED: "1-0", BLACK: "0-1", None: "1/2-1/2"}[result.winner]
+    user_side = None if game.ai_side is None else _side_name(-game.ai_side)
+    headers = my_game_headers(mode=game.mode, ai_level=game.ai_level, user_side=user_side)
+    game.library_id = library.save_game(
+        initial_fen=game.initial_fen,
+        moves=game.move_list,
+        result=code,
+        headers=headers,
+        library_id=game.library_id,
+    )
+    game.saved_ply = len(game.records)
+    return game.library_id
+
+
+def _autosave(request: Request, game: Game) -> None:
+    """棋局结束时自动保存到棋谱库（悔棋后再下完会更新同一条记录）。"""
+    if game.result() is not None and game.saved_ply != len(game.records):
+        try:
+            save_to_library(game, request.app.state.library)
+        except sqlite3.Error:
+            logger.exception("自动保存对局失败")
 
 
 def _side_name(side: int) -> str:
@@ -201,6 +250,8 @@ async def new_game(body: NewGameRequest, request: Request) -> GameView:
         game = Game.create(body, request.app.state.config.rules)
     except FenError as e:
         raise HTTPException(400, f"FEN 无效：{e}") from e
+    except GameError as e:
+        raise HTTPException(400, str(e)) from e
     _store(request)[game.id] = game
     return game.view()
 
@@ -220,6 +271,7 @@ async def play_move(game_id: str, body: MoveRequest, request: Request) -> GameVi
             game.play(body.move)
         except (NotationError, GameError) as e:
             raise HTTPException(400, str(e)) from e
+        _autosave(request, game)
         return game.view()
 
 
@@ -232,6 +284,14 @@ async def undo_move(game_id: str, request: Request) -> GameView:
         except GameError as e:
             raise HTTPException(400, str(e)) from e
         return game.view()
+
+
+@router.post("/{game_id}/save", response_model=SavedGame)
+async def save_game(game_id: str, request: Request) -> SavedGame:
+    """手动把（未下完的）对局保存到棋谱库；再次保存会更新同一条记录。"""
+    game = _get(request, game_id)
+    async with game.lock:
+        return SavedGame(library_id=save_to_library(game, request.app.state.library))
 
 
 @router.post("/{game_id}/ai-move", response_model=GameView)
@@ -253,6 +313,7 @@ async def ai_move(game_id: str, request: Request) -> GameView:
             raise HTTPException(500, "引擎没有给出着法")
         try:
             game.play_ai(move)
+            _autosave(request, game)
         except NotationError as e:
             raise HTTPException(
                 503, f"引擎给出了不合法的着法 {move}，请检查 config.toml 中 [engine] 的 flavor"

@@ -16,6 +16,7 @@
   --warning-text: #7a5300;
   --hint: #1e7d4f;
   --analysis: #2f6fd6;
+  --draw: #c9bfae;
   font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
   color: var(--text);
   background: var(--bg);
@@ -32,6 +33,7 @@
     --error-text: #ffb4a8;
     --warning-bg: #3a3020;
     --warning-text: #f3d48a;
+    --draw: #6f675c;
   }
 }
 
@@ -42,6 +44,10 @@
 body {
   margin: 0;
   background: var(--bg);
+}
+
+a {
+  color: var(--accent);
 }
 
 .app {
@@ -63,9 +69,28 @@ body {
   letter-spacing: 2px;
 }
 
-.stage {
+.tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.tabs a {
+  padding: 4px 14px;
+  border-radius: 999px;
   color: var(--muted);
-  font-size: 14px;
+  font-size: 15px;
+  text-decoration: none;
+}
+
+.tabs a:hover {
+  color: var(--text);
+}
+
+.tabs a.active {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .layout {
@@ -392,6 +417,7 @@ button:disabled {
 }
 
 .move-list {
+  position: relative; /* 打谱时按 offsetTop 滚动到当前着法 */
   max-height: 300px;
   overflow-y: auto;
 }
@@ -601,4 +627,489 @@ button.link {
 
 .new-game .buttons {
   margin: 0;
+}
+
+/* ---------- 通用小部件 ---------- */
+
+.tag {
+  display: inline-block;
+  margin: 0 6px;
+  padding: 0 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: normal;
+  white-space: nowrap;
+  vertical-align: 1px;
+}
+
+.stale {
+  opacity: 0.55;
+  transition: opacity 0.2s;
+}
+
+button.danger:hover:not(:disabled) {
+  border-color: var(--error-text);
+  color: var(--error-text);
+}
+
+.result-red {
+  color: var(--red-piece);
+}
+
+.result-other {
+  color: var(--muted);
+}
+
+/* 可点击的着法列表（打谱） */
+.move-list.selectable button.move {
+  border: none;
+  background: none;
+  padding: 0 4px;
+  margin-left: -4px;
+  font-size: inherit;
+  text-align: left;
+  justify-self: start;
+  border-radius: 4px;
+}
+
+.move-list.selectable button.move:hover {
+  background: var(--bg);
+}
+
+.library-save {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+/* ---------- 局面统计 ---------- */
+
+.explorer-summary {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.explorer-card .toggle + * {
+  margin-top: 12px;
+}
+
+.wdl-legend {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.wdl-legend i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 4px;
+  border-radius: 2px;
+}
+
+.explorer-moves {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.explorer-moves li {
+  display: grid;
+  grid-template-columns: 8.5em 6.5em minmax(90px, 1fr);
+  gap: 8px;
+  align-items: center;
+  padding: 5px 4px;
+  border-top: 1px solid var(--border);
+  font-size: 14px;
+}
+
+.explorer-moves li.played {
+  background: var(--bg);
+  border-radius: 4px;
+}
+
+.explorer-moves li.played .explorer-move {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.explorer-move {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 15px;
+}
+
+.explorer-count {
+  white-space: nowrap;
+  text-align: right;
+}
+
+.wdl-bar {
+  display: flex;
+  height: 18px;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.wdl-bar span {
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.wdl-red {
+  background: var(--red-piece);
+  color: #fff;
+}
+
+.wdl-draw {
+  background: var(--draw);
+  color: var(--text);
+}
+
+.wdl-black {
+  background: var(--black-piece);
+  color: #fff;
+}
+
+.wdl-bar .wdl-empty {
+  flex: 1;
+  color: var(--muted);
+}
+
+.explorer-links {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.explorer-links button.link {
+  padding: 0;
+  color: var(--accent);
+}
+
+/* ---------- 打谱 ---------- */
+
+.board-column {
+  position: sticky;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.board-column .board-panel {
+  position: static;
+}
+
+.viewer-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.viewer-nav button {
+  min-width: 44px;
+}
+
+.viewer-ply {
+  min-width: 13em;
+  text-align: center;
+  font-size: 15px;
+}
+
+.back-link {
+  display: inline-block;
+  margin-bottom: 8px;
+  text-decoration: none;
+}
+
+.card h2.viewer-title {
+  margin: 0 0 6px;
+  font-size: 20px;
+  color: var(--text);
+}
+
+.red-name {
+  color: var(--red-piece);
+}
+
+.viewer-info p {
+  margin: 4px 0;
+}
+
+.viewer-result {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 14px;
+}
+
+.result-badge {
+  font-weight: 700;
+  font-size: 16px;
+}
+
+.viewer-status {
+  max-width: 560px;
+}
+
+/* ---------- 棋谱库 ---------- */
+
+.library-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 24px;
+  align-items: start;
+}
+
+.library-main {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.library-stats {
+  margin: 0;
+  font-size: 15px;
+}
+
+.search-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 10px 14px;
+  align-items: end;
+}
+
+.search-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.search-form input,
+.search-form select {
+  font: inherit;
+  font-size: 14px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  min-width: 0;
+}
+
+.search-form .search-fen {
+  grid-column: 1 / -1;
+}
+
+.search-buttons {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 8px;
+}
+
+.results {
+  padding: 6px 0 10px;
+  overflow-x: auto;
+}
+
+.game-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.game-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--muted);
+  font-size: 13px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.game-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.game-table tbody tr {
+  cursor: pointer;
+}
+
+.game-table tbody tr:hover,
+.game-table tbody tr:focus-visible {
+  background: var(--bg);
+  outline: none;
+}
+
+.game-table .tag {
+  margin-left: 0;
+}
+
+.game-table .num {
+  text-align: right;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.pager {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 14px;
+  padding-top: 10px;
+  font-size: 14px;
+}
+
+.library-empty {
+  max-width: 640px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.library-empty .card p {
+  margin: 0 0 8px;
+  line-height: 1.7;
+}
+
+@media (max-width: 960px) {
+  .library-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---------- 导入 ---------- */
+
+.import-panel p {
+  line-height: 1.6;
+}
+
+.import-panel p:first-of-type {
+  margin-top: 0;
+}
+
+.import-panel code {
+  display: block;
+  margin-top: 4px;
+  word-break: break-all;
+}
+
+.import-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+}
+
+.import-item {
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+  font-size: 14px;
+}
+
+.import-item p {
+  margin: 6px 0 0;
+}
+
+.import-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.import-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.import-status {
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.import-item.done .import-status {
+  color: var(--hint);
+}
+
+.import-item.failed .import-status,
+.import-failed {
+  color: var(--error-text);
+}
+
+/* 不知道总局数，用来回移动的进度条表示「正在进行」 */
+.import-progress {
+  position: relative;
+  height: 4px;
+  margin-top: 6px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.import-progress::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 30%;
+  background: var(--accent);
+  border-radius: 2px;
+  animation: indeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes indeterminate {
+  from {
+    left: -30%;
+  }
+  to {
+    left: 100%;
+  }
+}
+
+.import-errors {
+  margin-top: 6px;
+  font-size: 13px;
+}
+
+.import-errors summary {
+  cursor: pointer;
+  color: var(--error-text);
+}
+
+.import-errors ol {
+  margin: 6px 0 0;
+  padding-left: 20px;
+  max-height: 240px;
+  overflow-y: auto;
+  line-height: 1.5;
+}
+
+button.import-clear {
+  display: block;
+  margin-top: 6px;
+  padding: 0;
+  color: var(--muted);
 }

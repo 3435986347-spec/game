@@ -30,6 +30,7 @@ export function AnalysisPanel({ info, error, finished }: AnalysisPanelProps) {
   if (finished) return <p className="muted small">棋局已结束。</p>;
   if (error) return <p className="error">{error}</p>;
   if (!info) return <p className="muted small">引擎计算中……</p>;
+  if (info.lines.length === 0) return <p className="muted small">这个局面没有可走的着法。</p>;
   return (
     <div className="analysis">
       <p className="muted small">深度 {info.depth}</p>

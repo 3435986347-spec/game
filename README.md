@@ -9,7 +9,7 @@
 - [x] **M0 项目骨架**：Python 后端（FastAPI）+ React 前端，一条命令启动
 - [x] **M1 规则引擎**：着法生成、将军 / 将死 / 困毙、长将判负、重复局面、自然限着、FEN、中文记谱双向转换；本地自由对弈界面（双方都由你来走）
 - [x] **M2 人机对战**：接入 Pikafish 引擎，10 级难度、两级提示、实时引擎分析（评估条 + 候选着法）
-- [ ] M3 棋谱库（导入、打谱、局面统计）
+- [x] **M3 棋谱库**：导入棋谱（PGN / 中文记谱 / WXF，可含多局，自动识别 GBK 编码）、检索、打谱、局面统计（开局库）、从棋谱任意一步试走或和 AI 对战；自己下完的对局自动存入棋谱库
 - [ ] M4 大模型讲解 + 复盘
 - [ ] M5 猜着练习、名局解读、错题本
 
@@ -67,6 +67,13 @@ uv run xiangqi
 - **提示**：「动哪个子」只高亮该动的棋子，让你自己想走法；「怎么走」给出具体着法（绿色箭头）、后续变化和走完后的期望得分。每局使用提示的次数会记录下来。
 - **引擎分析**：勾选「显示实时分析」后，棋盘左侧出现评估条（红色部分 = 红方期望得分），右侧列出引擎认为最好的 3 步及后续变化，蓝色箭头是当前最佳着法。下棋练习时建议关闭，复盘或研究局面时再打开。
 - **悔棋**：人机对战时一次撤回 AI 和你各一步。快捷键 Ctrl/⌘+Z；按 F 翻转棋盘。
+- **棋谱库**（页面顶部「棋谱库」）：
+  - 导入：在页面上选择棋谱文件；大文件（几万局）用命令行更快：`cd backend && uv run xiangqi-import <文件>`。不合法的对局会被跳过并说明原因（如「第 99 步 A6-I6 不合法：被将军时没有应将」）；同一局（着法和对局信息都相同）重复导入时自动跳过。
+  - 检索：按棋手、赛事、开局、结果筛选；也可以粘贴 FEN，找出走到过这个局面的对局。
+  - 打谱：点开一局，用 ← → 键（Home / End 跳到开局 / 终局）或按钮逐步回放；旁边的「局面统计」显示库中走到这个局面的对局数和之后各着法的胜负比例；可以打开引擎分析。
+  - 「从这里试走」「从这里和 AI 下」：从棋谱的当前局面开始自由摆走或和 AI 对战。
+  - 自己下完的对局会自动存入棋谱库（「我的对局」）；没下完的可以点「保存到棋谱库」。
+  - 局面统计只索引每局前 40 步（半回合），再往后的局面几乎每局都不同；可在 `config.toml` 的 `[library]` 中调整。
 
 **开发模式**（改前端代码时页面自动刷新）：
 
@@ -107,7 +114,13 @@ backend/xiangqi/engine/ 象棋引擎接入
   difficulty.py         难度级别与选着
   service.py            引擎进程管理
   check.py              xiangqi-engine-check：检查 / 挑选引擎版本
-backend/xiangqi/api/    FastAPI 接口（对局、提示、实时分析 WebSocket）
+backend/xiangqi/library/ 棋谱库
+  parse.py              棋谱文件解析（编码、多局切分、PGN 标签、着法）
+  importer.py           逐步校验着法，ICCS / 中文 / WXF 统一成 ICCS
+  db.py                 SQLite 存储、检索、局面索引与统计
+  openings.py           开局识别（自动，仅供参考）
+  cli.py                xiangqi-import 命令行导入
+backend/xiangqi/api/    FastAPI 接口（对局、提示、实时分析 WebSocket、棋谱库）
 backend/tests/          测试
 frontend/src/           React 界面（SVG 棋盘）
 docs/                   技术方案
@@ -118,6 +131,14 @@ docs/                   技术方案
 目前找到的可用棋谱（第三方数据，仅供个人学习，不要再分发；下载后放到 `data/` 目录，该目录不会提交到仓库）：
 
 - [CGLemon/chinese-chess-PGN](https://github.com/CGLemon/chinese-chess-PGN)：东萍象棋网棋谱仓库 99,813 局、世界象棋联合会 41,743 局，ICCS 格式 PGN，下载链接（Google Drive）在该仓库的 README 里。
-- [Kaggle：Online Chinese Chess (Xiangqi)](https://www.kaggle.com/datasets/boyofans/onlinexiangqi)：playOK 网站的 10,000 局快棋，WXF 记法。
+- [Kaggle：Online Chinese Chess (Xiangqi)](https://www.kaggle.com/datasets/boyofans/onlinexiangqi)：playOK 网站的 10,000 局快棋，WXF 记法（CSV 文件，目前不能直接导入）。
 
-棋谱导入功能在 M3 阶段实现。
+下载并导入东萍的 99,813 局（约 100 MB，需要能访问 Google Drive；导入约 3 分钟，棋谱库约 190 MB）：
+
+```bash
+uvx gdown --folder https://drive.google.com/drive/folders/12Js9Ld6Yixq4RA96j1PeT2QTUJ0-z0OB -O data/dpxq
+cd backend
+uv run xiangqi-import ../data/dpxq/ICCS/dpxq-99813games.pgns
+```
+
+其中有 32 局包含不合法着法（棋谱记录错误），会被跳过并列出原因。

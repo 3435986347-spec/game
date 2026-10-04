@@ -9,6 +9,10 @@ static_dir = "frontend/dist"   # 前端构建产物目录（cd frontend && npm r
 move_limit = 60          # 自然限着：连续多少回合无吃子判和，0 表示不限
 repetition_count = 3     # 同一局面出现几次进入重复判定（长将判负，其余判和）
 
+[library]
+db_path = "data/xiangqi.db"    # 棋谱库文件（data/ 目录不会提交到仓库）
+index_plies = 40               # 局面索引只记录每局前多少步（半回合）。再往后的局面几乎每局都不同，统计意义不大
+
 # 象棋引擎：安装方法见 README「安装象棋引擎」。可以用 cd backend && uv run xiangqi-engine-check ../engines/Pikafish
 # 自动挑选能在本机运行的最快版本，并打印要填写的内容。去掉下面几行开头的 # 即可启用。
 # [engine]

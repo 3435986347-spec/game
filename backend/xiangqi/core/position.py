@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from .board import BLACK, RED, Move
 from .fen import START_FEN, FenError, format_fen, parse_fen, validate_board
-from .movegen import in_check, legal_moves
+from .movegen import in_check, is_legal_move, legal_moves
 from .zobrist import PIECE_KEYS, SIDE_KEY, compute_key
 
 
@@ -93,7 +93,7 @@ class Position:
         return legal_moves(self.board, self.turn)
 
     def is_legal(self, move: Move) -> bool:
-        return move in legal_moves(self.board, self.turn)
+        return is_legal_move(self.board, self.turn, move)
 
     def in_check(self) -> bool:
         return in_check(self.board, self.turn)

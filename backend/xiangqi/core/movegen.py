@@ -30,54 +30,76 @@ def pseudo_legal_moves(b: list[int], side: int) -> list[Move]:
     """按各棋子走法生成着法，不检查走完后己方是否被将军。"""
     out: list[Move] = []
     for s, p in enumerate(b):
-        if p * side <= 0:
-            continue
-        t = p if side > 0 else -p
-        if t == ROOK:
-            for ray in RAYS[s]:
-                for x in ray:
-                    q = b[x]
-                    if q == 0:
-                        out.append((s, x))
-                        continue
-                    if q * side < 0:
-                        out.append((s, x))
-                    break
-        elif t == CANNON:
-            for ray in RAYS[s]:
-                screen = False
-                for x in ray:
-                    q = b[x]
-                    if not screen:
-                        if q == 0:
-                            out.append((s, x))  # 不吃子时像车一样走
-                        else:
-                            screen = True  # 找到炮架
-                    elif q != 0:
-                        if q * side < 0:
-                            out.append((s, x))  # 隔一子吃对方
-                        break
-        elif t == KNIGHT:
-            for to, leg in KNIGHT_MOVES[s]:
-                if b[leg] == 0 and b[to] * side <= 0:  # 蹩马腿
-                    out.append((s, to))
-        elif t == BISHOP:
-            for to, eye in BISHOP_MOVES[s]:
-                if b[eye] == 0 and b[to] * side <= 0:  # 塞象眼
-                    out.append((s, to))
-        elif t == ADVISOR:
-            for to in ADVISOR_MOVES[s]:
-                if b[to] * side <= 0:
-                    out.append((s, to))
-        elif t == KING:
-            for to in KING_MOVES[s]:
-                if b[to] * side <= 0:
-                    out.append((s, to))
-        elif t == PAWN:
-            for to in PAWN_MOVES[side][s]:
-                if b[to] * side <= 0:
-                    out.append((s, to))
+        if p * side > 0:
+            _piece_moves(b, s, side, out)
     return out
+
+
+def _piece_moves(b: list[int], s: int, side: int, out: list[Move]) -> None:
+    """格子 s 上 side 方棋子的伪合法着法，追加到 out。"""
+    t = b[s] if side > 0 else -b[s]
+    if t == ROOK:
+        for ray in RAYS[s]:
+            for x in ray:
+                q = b[x]
+                if q == 0:
+                    out.append((s, x))
+                    continue
+                if q * side < 0:
+                    out.append((s, x))
+                break
+    elif t == CANNON:
+        for ray in RAYS[s]:
+            screen = False
+            for x in ray:
+                q = b[x]
+                if not screen:
+                    if q == 0:
+                        out.append((s, x))  # 不吃子时像车一样走
+                    else:
+                        screen = True  # 找到炮架
+                elif q != 0:
+                    if q * side < 0:
+                        out.append((s, x))  # 隔一子吃对方
+                    break
+    elif t == KNIGHT:
+        for to, leg in KNIGHT_MOVES[s]:
+            if b[leg] == 0 and b[to] * side <= 0:  # 蹩马腿
+                out.append((s, to))
+    elif t == BISHOP:
+        for to, eye in BISHOP_MOVES[s]:
+            if b[eye] == 0 and b[to] * side <= 0:  # 塞象眼
+                out.append((s, to))
+    elif t == ADVISOR:
+        for to in ADVISOR_MOVES[s]:
+            if b[to] * side <= 0:
+                out.append((s, to))
+    elif t == KING:
+        for to in KING_MOVES[s]:
+            if b[to] * side <= 0:
+                out.append((s, to))
+    elif t == PAWN:
+        for to in PAWN_MOVES[side][s]:
+            if b[to] * side <= 0:
+                out.append((s, to))
+
+
+def is_legal_move(b: list[int], side: int, move: Move) -> bool:
+    """单步合法性检查：只生成走动那个子的着法，比生成全部合法着法快得多（导入棋谱时用）。"""
+    frm, to = move
+    if not (0 <= frm < 90 and 0 <= to < 90) or b[frm] * side <= 0:
+        return False
+    targets: list[Move] = []
+    _piece_moves(b, frm, side, targets)
+    if move not in targets:
+        return False
+    cap = b[to]
+    b[to] = b[frm]
+    b[frm] = 0
+    ok = not in_check(b, side)
+    b[frm] = b[to]
+    b[to] = cap
+    return ok
 
 
 def in_check(b: list[int], side: int) -> bool:

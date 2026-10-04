@@ -12,6 +12,7 @@ dependencies = [
 [project.scripts]
 xiangqi = "xiangqi.__main__:main"
 xiangqi-engine-check = "xiangqi.engine.check:main"
+xiangqi-import = "xiangqi.library.cli:main"
 
 [dependency-groups]
 dev = [
