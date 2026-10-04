@@ -10,7 +10,8 @@ from .. import __version__
 from ..config import AppConfig
 from ..engine import EngineService
 from ..library import Library
-from . import analysis, games
+from ..llm import ExplainService
+from . import analysis, coach, games, review
 from . import library as library_api
 
 _NOT_BUILT_HTML = """<!doctype html><meta charset="utf-8"><title>象棋自学</title>
@@ -33,6 +34,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         await library_api.stop_imports(
             app.state.import_jobs
         )  # 中止进行中的导入，否则要等它导完才能退出
+        await review.stop_reviews(app.state.review_jobs)
         await engines.close()  # 退出时关闭引擎进程
         library.close()
 
@@ -44,9 +46,13 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.analysis_socket = None
     app.state.library = library
     app.state.import_jobs = {}
+    app.state.review_jobs = {}
+    app.state.explainer = ExplainService(config.llm, cache=library)
     app.include_router(games.router)
     app.include_router(analysis.router)
     app.include_router(library_api.router)
+    app.include_router(review.router)
+    app.include_router(coach.router)
 
     @app.get("/api/health", tags=["系统"])
     def health() -> dict[str, str]:

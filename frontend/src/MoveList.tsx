@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
-import type { LibraryMove, Side } from "./api";
+import type { Grade, LibraryMove, Side } from "./api";
+import { GRADE_STYLE } from "./useReview";
 
 interface MoveListProps {
   moves: LibraryMove[];
@@ -9,6 +10,8 @@ interface MoveListProps {
   /** 传入时着法可以点击，参数为着法下标 */
   onSelect?: (index: number) => void;
   emptyText?: string;
+  /** 各步的评级（下标与 moves 相同，没评级的为 undefined），失误等在着法后加标记 */
+  grades?: (Grade | undefined)[];
 }
 
 /** 按回合排列的着法列表：每行一个回合，红方在左、黑方在右。 */
@@ -18,6 +21,7 @@ export default function MoveList({
   currentIndex,
   onSelect,
   emptyText = "还没有走棋。点击棋子，再点击落点。",
+  grades,
 }: MoveListProps) {
   const listRef = useRef<HTMLDivElement>(null);
   const currentRef = useRef<HTMLElement | null>(null);
@@ -62,19 +66,25 @@ export default function MoveList({
               const index = r * 2 + c;
               const current = !!move && index === highlighted;
               const className = current ? "move current" : "move";
+              const grade = move ? grades?.[index - offset] : undefined;
+              const style = grade ? GRADE_STYLE[grade] : null;
+              const mark = style?.mark
+                ? <span className={`grade-mark ${style.className}`}>{style.mark}</span>
+                : null;
+              const title = move && grade ? `${move.iccs} · ${grade}` : move?.iccs;
               if (move && onSelect) {
                 return (
-                  <button key={c} type="button" className={className} title={move.iccs}
+                  <button key={c} type="button" className={className} title={title}
                     ref={current ? (el) => { currentRef.current = el; } : undefined}
                     onClick={() => onSelect(index - offset)}>
-                    {move.cn}
+                    {move.cn}{mark}
                   </button>
                 );
               }
               return (
-                <span key={c} className={className} title={move?.iccs}
+                <span key={c} className={className} title={title}
                   ref={current ? (el) => { currentRef.current = el; } : undefined}>
-                  {move ? move.cn : c === 0 ? "……" : ""}
+                  {move ? <>{move.cn}{mark}</> : c === 0 ? "……" : ""}
                 </span>
               );
             })}

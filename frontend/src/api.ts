@@ -52,10 +52,12 @@ export interface NewGameOptions {
   ai_level: number;
 }
 
+export type HintLevel = 1 | 2 | 3;
+
 export interface HintView {
-  level: 2 | 3;
-  /** 该动的棋子所在格，如 "h0" */
-  from_square: string;
+  level: HintLevel;
+  /** 该动的棋子所在格，如 "h0"；1 级提示（只指方向）为 null */
+  from_square: string | null;
   move: string | null;
   cn: string | null;
   pv_cn: string[] | null;
@@ -211,6 +213,98 @@ export interface OpeningInfo {
   games: number;
 }
 
+// ---------- 讲解与复盘 ----------
+
+export type Grade = "妙着" | "好棋" | "可以" | "缓着" | "失误" | "漏着";
+
+export interface LLMStatus {
+  /** none | claude | openai_compat */
+  provider: string;
+  model: string | null;
+  /** 配置齐全（检查时不实际调用大模型，不代表 Key 一定有效） */
+  ready: boolean;
+  problem: string | null;
+  level: string;
+}
+
+export interface Explanation {
+  headline: string;
+  why: string;
+  better: string;
+  principle: string;
+  tags: string[];
+  /** llm：大模型讲解；template：模板讲解（没配大模型、出错或没通过校验时） */
+  source: "llm" | "template";
+  provider: string | null;
+  model: string | null;
+  /** 使用模板讲解的原因 */
+  note: string | null;
+}
+
+export interface ReviewMove {
+  /** 第几步（从 1 开始）= 走完这步后的局面序号 */
+  ply: number;
+  iccs: string;
+  cn: string;
+  side: Side;
+  grade: Grade;
+  phase: string;
+  /** 走棋方视角：走这步之前（按引擎最佳着法）的期望得分 0..1 */
+  win_before: number;
+  /** 走棋方视角：走完这步之后的期望得分 */
+  win_after: number;
+  /** 期望得分下降（走了引擎最佳着法时为 0） */
+  drop: number;
+  best_move: string | null;
+  best_cn: string | null;
+  best_pv_cn: string[];
+  explanation: Explanation | null;
+}
+
+/** 边下边分析：对局中一步棋的评级 */
+export interface MoveAnalysis extends ReviewMove {
+  /** 走完这步之后红方的期望得分 */
+  red_win: number;
+  /** 走完这步棋局结束时的说明 */
+  terminal: string | null;
+}
+
+export interface SideStats {
+  moves: number;
+  /** 准确率 0–100 */
+  accuracy: number | null;
+  /** 开局 / 中局 / 残局 → 准确率 */
+  phases: Record<string, number | null>;
+  grades: Record<string, number>;
+}
+
+export interface ReviewReport {
+  engine: string | null;
+  movetime_ms: number | null;
+  created_at: string;
+  /** 关注的一方：自己的对局只看自己 */
+  focus: Side[];
+  /** curve[i]：走了 i 步之后红方的期望得分 */
+  curve: number[];
+  terminal: string | null;
+  moves: ReviewMove[];
+  stats: Record<Side, SideStats>;
+  /** 关键时刻（步数），最多 3 个 */
+  key_moments: number[];
+  tags: { tag: string; count: number }[];
+}
+
+export interface ReviewView {
+  game_id: number;
+  status: "none" | "running" | "done" | "error";
+  /** analysing（引擎分析）| explaining（生成讲解） */
+  phase: string | null;
+  progress: number;
+  total: number;
+  error: string | null;
+  report: ReviewReport | null;
+}
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -256,7 +350,7 @@ export const api = {
     }),
   undo: (id: string) => request<GameView>(`/api/games/${id}/undo`, { method: "POST" }),
   aiMove: (id: string) => request<GameView>(`/api/games/${id}/ai-move`, { method: "POST" }),
-  hint: (id: string, level: 2 | 3) =>
+  hint: (id: string, level: HintLevel) =>
     request<HintView>(`/api/games/${id}/hint`, {
       method: "POST",
       body: JSON.stringify({ level }),
@@ -282,6 +376,35 @@ export const api = {
   explorer: (fen: string, signal?: AbortSignal) =>
     request<ExplorerView>(`/api/library/explorer?fen=${encodeURIComponent(fen)}`, { signal }),
   openings: () => request<OpeningInfo[]>("/api/library/openings"),
+
+  llmStatus: () => request<LLMStatus>("/api/llm"),
+  getReview: (libraryId: number) => request<ReviewView>(`/api/library/games/${libraryId}/review`),
+  /** 开始复盘（已有结果且着法没变时直接返回结果；force 为 true 时重新分析） */
+  startReview: (libraryId: number, force = false) =>
+    request<ReviewView>(`/api/library/games/${libraryId}/review`, {
+      method: "POST",
+      body: JSON.stringify({ force }),
+    }),
+  /** 讲解第 ply 步（需要先复盘）；refresh 为 true 时重新生成 */
+  explainMove: (libraryId: number, ply: number, refresh = false) =>
+    request<Explanation>(
+      `/api/library/games/${libraryId}/review/explain${refresh ? "?refresh=true" : ""}`,
+      { method: "POST", body: JSON.stringify({ ply }) },
+    ),
+  /** 对弈中的对局：先保存到棋谱库，再开始复盘 */
+  reviewLiveGame: (gameId: string) =>
+    request<{ library_id: number }>(`/api/games/${gameId}/review`, { method: "POST" }),
+  /** 边下边分析：对局中第 ply 步的评级 */
+  analyseMove: (gameId: string, ply: number) =>
+    request<MoveAnalysis>(`/api/games/${gameId}/analysis`, {
+      method: "POST",
+      body: JSON.stringify({ ply }),
+    }),
+  explainGameMove: (gameId: string, ply: number) =>
+    request<Explanation>(`/api/games/${gameId}/analysis/explain`, {
+      method: "POST",
+      body: JSON.stringify({ ply }),
+    }),
 };
 
 /** 查询参数，空值不发送。 */

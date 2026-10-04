@@ -21,8 +21,9 @@ from dataclasses import dataclass
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
 from ..core import RED, FenError, NotationError, Position, parse_iccs
+from ..core.variation import pv_to_chinese
 from ..engine import LEVELS, EngineError, EngineService, EngineUnavailable, InfoLine
-from .games import Game, pv_to_chinese, red_expected
+from .games import Game, red_expected
 from .schemas import EngineStatusView, LevelView
 
 router = APIRouter(tags=["引擎"])

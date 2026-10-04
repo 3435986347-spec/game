@@ -1113,3 +1113,265 @@ button.import-clear {
   padding: 0;
   color: var(--muted);
 }
+
+/* ---------- 复盘与讲解 ---------- */
+
+.grade-brilliant {
+  color: #1f7fb8;
+}
+
+.grade-good,
+.grade-ok {
+  color: var(--muted);
+}
+
+.grade-inaccuracy {
+  color: #b7861a;
+}
+
+.grade-mistake {
+  color: #d9622b;
+}
+
+.grade-blunder {
+  color: #c62828;
+}
+
+.grade-mark {
+  margin-left: 2px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.grade-badge {
+  display: inline-block;
+  margin: 0 6px;
+  padding: 0 7px;
+  border-radius: 4px;
+  border: 1px solid currentColor;
+  font-size: 12px;
+  font-weight: 600;
+  vertical-align: 2px;
+  white-space: nowrap;
+}
+
+.card.review h3 {
+  margin: 14px 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.review-intro {
+  margin: 0 0 10px;
+  line-height: 1.6;
+}
+
+.review-llm,
+.review-meta {
+  margin: 10px 0 0;
+}
+
+.review-progress p {
+  margin: 0 0 6px;
+}
+
+.progress-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.progress-bar > div {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s;
+}
+
+.accuracy-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.accuracy {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg);
+  border-left: 4px solid var(--black-piece);
+}
+
+.accuracy.red {
+  border-left-color: var(--red-piece);
+}
+
+.accuracy.dim {
+  opacity: 0.6;
+}
+
+.accuracy-title {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.accuracy-value {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.accuracy-grades {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 2px;
+}
+
+.win-chart {
+  width: 100%;
+  height: auto;
+  display: block;
+  cursor: pointer;
+}
+
+.win-chart-bg {
+  fill: #3a3631;
+}
+
+.win-chart-area {
+  fill: var(--red-piece);
+  opacity: 0.85;
+}
+
+.win-chart-mid {
+  stroke: #fff;
+  stroke-opacity: 0.45;
+  stroke-dasharray: 4 4;
+}
+
+.win-chart-line {
+  fill: none;
+  stroke: #fff;
+  stroke-width: 1.5;
+  stroke-opacity: 0.8;
+}
+
+.win-chart-cursor {
+  stroke: var(--analysis);
+  stroke-width: 2;
+}
+
+.win-chart-mark {
+  stroke: #fff;
+  stroke-width: 1.5;
+  fill: currentColor;
+}
+
+.win-chart-label {
+  fill: #fff;
+  font-size: 12px;
+}
+
+.key-moments {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.key-moments li {
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.key-moments li.current .key-moment-head strong {
+  color: var(--accent);
+}
+
+.key-moment-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 4px;
+}
+
+.key-moment-head button.link {
+  padding: 0;
+  text-decoration: none;
+  font-size: 15px;
+}
+
+.key-moments .buttons {
+  margin: 6px 0 0;
+}
+
+.review-tags {
+  margin: 10px 0 0;
+  line-height: 1.8;
+}
+
+.explanation {
+  margin-top: 6px;
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.explanation p {
+  margin: 2px 0;
+}
+
+.explanation-headline {
+  font-weight: 600;
+}
+
+.explanation-label {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.explanation-tags .tag {
+  margin: 0 6px 0 0;
+}
+
+.explanation-source {
+  margin-top: 4px !important;
+}
+
+.move-review h2 {
+  color: var(--text);
+}
+
+.move-review-cn {
+  font-size: 17px;
+}
+
+.move-review p {
+  margin: 4px 0;
+}
+
+.move-review > button {
+  margin-top: 6px;
+}
+
+.hint-buttons {
+  flex-wrap: wrap;
+}
+
+button.library-review {
+  margin-left: auto;
+}
+
+/* ---------- 边下边分析 ---------- */
+
+.live-analysis .toggle + * {
+  margin-top: 10px;
+}
+
+.move-review-title {
+  margin: 0 0 4px;
+}

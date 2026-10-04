@@ -16,13 +16,30 @@ index_plies = 40               # 局面索引只记录每局前多少步（半�
 # 象棋引擎：安装方法见 README「安装象棋引擎」。可以用 cd backend && uv run xiangqi-engine-check ../engines/Pikafish
 # 自动挑选能在本机运行的最快版本，并打印要填写的内容。去掉下面几行开头的 # 即可启用。
 # [engine]
-# path = "engines/Pikafish/MacOS/pikafish-apple-silicon"   # 引擎可执行文件（Windows 为 .exe）
+# path = "engines/Pikafish/Pikafish-MacOS-universal"   # 引擎可执行文件（Windows 为 .exe）
 # flavor = "pikafish"          # pikafish | fairy-stockfish
 # eval_file = ""               # pikafish.nnue 的路径；留空则在引擎所在目录及上两级目录中查找
 # threads = 2                  # 每个引擎实例的线程数（对局和分析各一个实例）
 # hash_mb = 128
 # hint_movetime_ms = 1000      # 提示时引擎思考多久（毫秒）
 
-# 以下配置在后续阶段启用：
-# [llm]
-# provider = "none"      # "openai_compat" | "claude" | "none"
+# 复盘：引擎分析每个局面的时间（毫秒）。越长越准，复盘也越慢（100 步的棋约 80 秒）
+[review]
+movetime_ms = 800
+
+# 大模型讲解（复盘的关键时刻、打谱时的「讲解这步」）。不配置也能用：会退回模板讲解，只是没那么自然。
+# API Key 不要写在这里：写在仓库根目录的 .env 文件里（不会提交到仓库），或系统环境变量里。
+[llm]
+provider = "none"        # "claude" | "openai_compat"（DeepSeek 等）| "none"（只用模板讲解）
+level = "入门"           # 你的水平，决定讲解深浅和用词，如 入门 / 初级 / 中级 / 高级
+
+[llm.claude]
+model = "claude-opus-5-5"
+api_key_env = "ANTHROPIC_API_KEY"   # .env 里写一行 ANTHROPIC_API_KEY=sk-ant-...
+effort = "medium"                    # low | medium | high：越高想得越仔细，也越慢、越贵
+
+[llm.openai_compat]
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"     # .env 里写一行 DEEPSEEK_API_KEY=sk-...
+model = ""                           # 按服务商文档填写模型名
+json_mode = true                     # 部分推理模型不支持 JSON 模式，设为 false

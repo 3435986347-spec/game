@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "中国象棋自学应用：规则引擎、人机对战、AI 提示、棋谱训练"
 requires-python = ">=3.11"
 dependencies = [
+    "anthropic>=1.11.0",
     "fastapi>=0.115",
+    "openai>=3.24.0",
     "uvicorn>=0.30",
     "websockets>=13",
 ]
@@ -13,6 +15,7 @@ dependencies = [
 xiangqi = "xiangqi.__main__:main"
 xiangqi-engine-check = "xiangqi.engine.check:main"
 xiangqi-import = "xiangqi.library.cli:main"
+xiangqi-llm-eval = "xiangqi.llm.evaluate:main"
 
 [dependency-groups]
 dev = [
@@ -36,3 +39,6 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"xiangqi/llm/prompts.py" = ["E501"]  # 提示词原文，不为行宽折行

@@ -5,6 +5,10 @@
   kind 为 library（导入的棋谱）或 my_game（自己下的对局）。
 - positions：局面索引，只记录每局前 index_plies 步。key 为 Zobrist 哈希（含走棋方），
   next_move 为这个局面下实际走的下一步（from * 90 + to；终局为 NULL）。用于局面检索和开局统计。
+- reviews / move_analysis：整盘复盘的结果（每局一份）。move_analysis 每个局面一行：
+  引擎评估、走到这个局面的那步棋的评级，以及讲解。对局删除时一并删除；
+  对局着法改过之后（reviews.moves_hash 对不上）读取时作废。
+- explain_cache：大模型讲解的缓存（局面 + 着法 + 评级 + 水平 + 模型），同样的错误不重复花钱。
 每个线程用自己的连接（导入在后台线程进行），数据库为 WAL 模式，导入时也可以正常查询。
 导入时最多约 1 秒提交一次，写锁不会长时间占着，导入期间保存对局只需稍等。
 """
@@ -12,6 +16,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import threading
 import time
@@ -27,7 +32,7 @@ from .importer import GameFormatError, ParsedGame, resolve_game
 from .openings import classify
 from .parse import RawGame
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS games (
     id INTEGER PRIMARY KEY AUTOINCREMENT,  -- id 不复用：删掉的对局，旧链接不会指到别的对局
@@ -54,6 +59,36 @@ CREATE TABLE IF NOT EXISTS positions (
     PRIMARY KEY (key, game_id, ply)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS reviews (
+    game_id INTEGER PRIMARY KEY,
+    moves_hash TEXT NOT NULL,  -- 复盘时的起始局面 + 着法；对局改过之后复盘作废
+    engine TEXT,
+    movetime_ms INTEGER,
+    summary TEXT NOT NULL,  -- JSON：准确率、分阶段表现、各评级数量、关键时刻
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE TABLE IF NOT EXISTS move_analysis (
+    game_id INTEGER NOT NULL,
+    ply INTEGER NOT NULL,  -- 局面序号：0 为起始局面，i 为走完第 i 步之后
+    red_win REAL NOT NULL,  -- 这个局面红方的期望得分
+    lines TEXT NOT NULL,  -- JSON：引擎候选着法（走棋方视角）
+    terminal TEXT,  -- 终局说明
+    move TEXT,  -- 走到这个局面的那步棋（ply ≥ 1）及其评级
+    grade TEXT,
+    win_before REAL,
+    win_after REAL,
+    is_best INTEGER,
+    phase TEXT,
+    explanation TEXT,  -- JSON：讲解（关键时刻自动生成，其余按需生成）
+    PRIMARY KEY (game_id, ply)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS explain_cache (
+    cache_key TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    provider TEXT,
+    model TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
 """
 
 RESULTS = ("1-0", "0-1", "1/2-1/2", "*")
@@ -150,8 +185,8 @@ class Library:
     def _init_schema(self) -> None:
         conn = self.connect()
         conn.executescript(_SCHEMA)
-        conn.execute(
-            "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",
+        conn.execute(  # 新表都是 CREATE IF NOT EXISTS，旧库打开时自动补上
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
         conn.commit()
@@ -270,6 +305,7 @@ class Library:
             if updated:
                 conn.execute("DELETE FROM positions WHERE game_id = ?", (library_id,))
                 self._index_positions(conn, library_id, parsed)
+                # 旧的复盘不用在这里删：读取时按 moves_hash 比较，着法变了才作废
                 conn.commit()
                 return library_id
         game_id = self._insert(
@@ -351,8 +387,126 @@ class Library:
         conn = self.connect()
         deleted = conn.execute("DELETE FROM games WHERE id = ?", (game_id,)).rowcount
         conn.execute("DELETE FROM positions WHERE game_id = ?", (game_id,))
+        self._delete_review(conn, game_id)
         conn.commit()
         return deleted > 0
+
+    # ---- 复盘 ----
+
+    def game_moves(self, game_id: int) -> dict | None:
+        """复盘需要的对局信息：起始局面、着法、对局双方、类型。"""
+        row = (
+            self.connect()
+            .execute(
+                "SELECT initial_fen, moves, red, black, kind FROM games WHERE id = ?", (game_id,)
+            )
+            .fetchone()
+        )
+        if row is None:
+            return None
+        return {**dict(row), "moves": row["moves"].split()}
+
+    def save_review(
+        self,
+        game_id: int,
+        *,
+        moves_hash: str,
+        engine: str | None,
+        movetime_ms: int | None,
+        summary: dict,
+        rows: list[dict],
+    ) -> None:
+        """保存复盘结果（覆盖旧的）。rows 为 move_analysis 的各行（键与列名相同）。
+        复盘期间对局被删掉了就不保存。"""
+        conn = self.connect()
+        try:
+            self._delete_review(conn, game_id)  # 第一条写语句：拿到写锁，下面的检查不会被打断
+            if not conn.execute("SELECT 1 FROM games WHERE id = ?", (game_id,)).fetchone():
+                conn.rollback()
+                return
+            conn.execute(
+                """INSERT INTO reviews (game_id, moves_hash, engine, movetime_ms, summary)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (game_id, moves_hash, engine, movetime_ms, json.dumps(summary, ensure_ascii=False)),
+            )
+            conn.executemany(
+                """INSERT INTO move_analysis (game_id, ply, red_win, lines, terminal, move, grade,
+                       win_before, win_after, is_best, phase, explanation)
+                   VALUES (:game_id, :ply, :red_win, :lines, :terminal, :move, :grade,
+                       :win_before, :win_after, :is_best, :phase, :explanation)""",
+                [
+                    {
+                        "game_id": game_id,
+                        "terminal": None,
+                        "move": None,
+                        "grade": None,
+                        "win_before": None,
+                        "win_after": None,
+                        "is_best": None,
+                        "phase": None,
+                        "explanation": None,
+                        **row,
+                    }
+                    for row in rows
+                ],
+            )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+
+    def get_review(self, game_id: int) -> tuple[dict, list[dict]] | None:
+        """(reviews 行，summary 已解析；move_analysis 各行，按 ply 排序)。没有复盘时返回 None。"""
+        conn = self.connect()
+        review = conn.execute("SELECT * FROM reviews WHERE game_id = ?", (game_id,)).fetchone()
+        if review is None:
+            return None
+        info = dict(review)
+        info["summary"] = json.loads(info["summary"])
+        rows = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT * FROM move_analysis WHERE game_id = ? ORDER BY ply", (game_id,)
+            )
+        ]
+        return info, rows
+
+    def set_explanation(self, game_id: int, ply: int, explanation: dict) -> None:
+        conn = self.connect()
+        conn.execute(
+            "UPDATE move_analysis SET explanation = ? WHERE game_id = ? AND ply = ?",
+            (json.dumps(explanation, ensure_ascii=False), game_id, ply),
+        )
+        conn.commit()
+
+    def delete_review(self, game_id: int) -> None:
+        conn = self.connect()
+        self._delete_review(conn, game_id)
+        conn.commit()
+
+    @staticmethod
+    def _delete_review(conn: sqlite3.Connection, game_id: int) -> None:
+        conn.execute("DELETE FROM reviews WHERE game_id = ?", (game_id,))
+        conn.execute("DELETE FROM move_analysis WHERE game_id = ?", (game_id,))
+
+    # ---- 讲解缓存 ----
+
+    def get_explanation(self, key: str) -> dict | None:
+        row = (
+            self.connect()
+            .execute("SELECT content FROM explain_cache WHERE cache_key = ?", (key,))
+            .fetchone()
+        )
+        return None if row is None else json.loads(row["content"])
+
+    def put_explanation(self, key: str, content: dict, provider: str, model: str) -> None:
+        conn = self.connect()
+        conn.execute(
+            """INSERT OR REPLACE INTO explain_cache (cache_key, content, provider, model)
+               VALUES (?, ?, ?, ?)""",
+            (key, json.dumps(content, ensure_ascii=False), provider, model),
+        )
+        conn.commit()
 
     def explorer(self, fen: str) -> dict:
         """某个局面在库中出现过多少局，以及之后各着法的局数和胜负。"""
@@ -419,6 +573,11 @@ def _content_hash(row: dict[str, object]) -> str:
     fields = ("initial_fen", "moves", "event", "round", "date", "red", "black")
     text = "|".join(str(row[name] or "") for name in fields)
     return hashlib.sha1(text.encode()).hexdigest()
+
+
+def moves_hash(initial_fen: str, moves: list[str]) -> str:
+    """对局内容（起始局面 + 着法）的指纹：复盘结果是否还对应当前的着法。"""
+    return hashlib.sha1(f"{initial_fen}|{' '.join(moves)}".encode()).hexdigest()
 
 
 def fen_key(fen: str) -> int:

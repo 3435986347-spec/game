@@ -7,13 +7,15 @@ import ExplorerPanel from "./ExplorerPanel";
 import MoveList from "./MoveList";
 import NewGamePanel from "./NewGamePanel";
 import { ApiError, api, errorText, squareFromIccs } from "./api";
-import type { GameView, HintView, NewGameOptions, Side } from "./api";
+import type { GameView, HintLevel, HintView, NewGameOptions, Side } from "./api";
 import { sideToMove } from "./fen";
 import { isTypingTarget } from "./keyboard";
-import { gameHash } from "./router";
-import { loadSavedGameId, saveGameId } from "./settings";
+import { MoveReview, useLlmStatus } from "./ReviewPanel";
+import { gameHash, navigate } from "./router";
+import { loadLiveAnalysis, loadSavedGameId, saveGameId, saveLiveAnalysis } from "./settings";
 import { useAnalysis } from "./useAnalysis";
 import { useEngineStatus } from "./useEngineStatus";
+import { useLiveAnalysis } from "./useLiveAnalysis";
 
 const AI_MIN_DELAY_MS = 400; // AI 走得太快时稍等一下，看得清对方走了哪步
 
@@ -42,7 +44,10 @@ export default function PlayPage() {
   const [analysisOn, setAnalysisOn] = useState(false);
   const [explorerOn, setExplorerOn] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
+  const [liveOn, setLiveOn] = useState(loadLiveAnalysis);
   const aiRequested = useRef<string | null>(null);
+  const llm = useLlmStatus();
 
   const engineReady = engine?.ok ?? false;
   const thinking = !!game && thinkingFor === game.id;
@@ -144,7 +149,7 @@ export default function PlayPage() {
     if (game && canUndo) void run(() => api.undo(game.id));
   }, [game, canUndo, run]);
 
-  const askHint = async (level: 2 | 3) => {
+  const askHint = async (level: HintLevel) => {
     if (!game || !pos) return;
     setHintLoading(true);
     try {
@@ -172,6 +177,19 @@ export default function PlayPage() {
       setError(errorText(e));
     } finally {
       setSaving(false);
+    }
+  };
+
+  // 复盘：先保存到棋谱库（已保存且没变化时不重复保存），再到打谱页查看复盘进度和报告
+  const reviewGame = async () => {
+    if (!game) return;
+    setReviewing(true);
+    try {
+      const { library_id } = await api.reviewLiveGame(game.id);
+      navigate(gameHash(library_id));
+    } catch (e) {
+      setError(errorText(e));
+      setReviewing(false);
     }
   };
 
@@ -212,6 +230,11 @@ export default function PlayPage() {
     pos?.fen,
     finished,
   );
+  const live = useLiveAnalysis(game, liveOn && engineReady);
+  const toggleLive = (on: boolean) => {
+    setLiveOn(on);
+    saveLiveAnalysis(on);
+  };
   const visibleHint = hint && game && hint.gameId === game.id && hint.fen === game.position.fen ? hint : null;
   const arrows: Arrow[] = [];
   if (visibleHint?.move) arrows.push({ move: visibleHint.move, kind: "hint" });
@@ -220,6 +243,7 @@ export default function PlayPage() {
   const firstMover: Side = game ? sideToMove(game.initial_fen) : "red";
   const userTurn = !!game && !finished && !game.ai_to_move && !thinking;
   const canHint = engineReady && userTurn && !hintLoading;
+  const canReview = engineReady && !!game && game.moves.length > 0 && !busy && !reviewing;
 
   return (
     <main className="layout">
@@ -233,7 +257,7 @@ export default function PlayPage() {
             flipped={flipped}
             onMove={(m) => void play(m)}
             interactive={userTurn}
-            highlight={visibleHint ? squareFromIccs(visibleHint.from_square) : null}
+            highlight={visibleHint?.from_square ? squareFromIccs(visibleHint.from_square) : null}
             arrows={arrows}
           />
         ) : (
@@ -255,7 +279,15 @@ export default function PlayPage() {
         {game && pos && (
           <div className="card status">
             {pos.result ? (
-              <div className="result">{resultText(game)}</div>
+              <>
+                <div className="result">{resultText(game)}</div>
+                <div className="buttons">
+                  <button className="primary" onClick={() => void reviewGame()} disabled={!canReview}
+                    title={engineReady ? "用引擎分析整盘棋，找出失误和关键时刻" : "复盘需要先安装象棋引擎"}>
+                    {reviewing ? "正在准备复盘……" : "复盘这局"}
+                  </button>
+                </div>
+              </>
             ) : (
               <div className={`turn ${pos.turn}`}>
                 <span className="turn-dot" />
@@ -292,11 +324,13 @@ export default function PlayPage() {
               <button onClick={undo} disabled={!canUndo}>悔棋</button>
               <button onClick={() => setFlipped((f) => !f)}>翻转棋盘</button>
             </div>
-            <div className="buttons">
+            <div className="buttons hint-buttons">
+              <button onClick={() => void askHint(1)} disabled={!userTurn || hintLoading}
+                title="只指出方向（如哪个子有危险），不说具体走法">提示：方向</button>
               <button onClick={() => void askHint(2)} disabled={!canHint}
-                title="只告诉你该动哪个子">提示：动哪个子</button>
+                title="只告诉你该动哪个子">动哪个子</button>
               <button onClick={() => void askHint(3)} disabled={!canHint}
-                title="给出具体着法和后续变化">提示：怎么走</button>
+                title="给出具体着法和后续变化">怎么走</button>
               {hintLoading && <span className="muted small">思考中……</span>}
             </div>
             <form className="inline-form" onSubmit={submitMove}>
@@ -314,9 +348,43 @@ export default function PlayPage() {
 
         {visibleHint && (
           <div className="card hint">
-            <h2>{visibleHint.level === 2 ? "提示" : "提示：推荐着法"}</h2>
+            <h2>{["提示：方向", "提示：动哪个子", "提示：推荐着法"][visibleHint.level - 1]}</h2>
             <p>{visibleHint.text}</p>
           </div>
+        )}
+
+        {game && (
+          <div className="card live-analysis">
+            <h2>每步分析</h2>
+            <label className="toggle">
+              <input type="checkbox" checked={liveOn} onChange={(e) => toggleLive(e.target.checked)} />
+              走一步分析一步：每走一步，马上给这步评级，并指出更好的走法
+              {game.mode === "vs_ai" ? "（只分析你自己的着法）" : ""}
+            </label>
+            {liveOn && !engineReady && (
+              <p className="muted small">需要先安装象棋引擎（见 README「安装象棋引擎」）。</p>
+            )}
+            {liveOn && engineReady && (
+              <>
+                {live.pending !== null && <p className="muted small">正在分析第 {live.pending} 步……</p>}
+                {live.error && (
+                  <p className="error">
+                    {live.error}
+                    <button className="link" onClick={live.retry}>重试</button>
+                  </p>
+                )}
+                {!live.latest && live.pending === null && !live.error && (
+                  <p className="muted small">走一步之后，这里会显示这步的评级。</p>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {liveOn && engineReady && live.latest && (
+          <MoveReview llm={llm} move={live.latest} loading={live.explaining} busy={live.explaining}
+            onExplain={() => void live.explain()} canRefresh={false}
+            title={live.latest.terminal ? `刚才这步 · ${live.latest.terminal}` : "刚才这步"} />
         )}
 
         <div className="card engine">
@@ -368,7 +436,8 @@ export default function PlayPage() {
         {game && (
           <div className="card moves">
             <h2>着法</h2>
-            <MoveList moves={game.moves} firstMover={firstMover} />
+            <MoveList moves={game.moves} firstMover={firstMover}
+              grades={liveOn ? live.grades : undefined} />
             <div className="library-save small">
               {game.library_id ? (
                 <>
@@ -382,6 +451,12 @@ export default function PlayPage() {
                 <button onClick={() => void saveToLibrary()} disabled={saving || game.moves.length === 0}
                   title="下完的对局会自动保存；没下完的也可以先保存">
                   {saving ? "保存中……" : "保存到棋谱库"}
+                </button>
+              )}
+              {!finished && (
+                <button className="library-review" onClick={() => void reviewGame()} disabled={!canReview}
+                  title={engineReady ? "保存到棋谱库并复盘到目前为止的着法" : "复盘需要先安装象棋引擎"}>
+                  {reviewing ? "准备中……" : "复盘"}
                 </button>
               )}
             </div>

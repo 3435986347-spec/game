@@ -3,6 +3,7 @@ import type { NewGameOptions } from "./api";
 
 const GAME_KEY = "xiangqi.gameId";
 const SETTINGS_KEY = "xiangqi.newGame";
+const LIVE_ANALYSIS_KEY = "xiangqi.liveAnalysis";
 
 export type NewGameSettings = Omit<NewGameOptions, "fen" | "moves">;
 
@@ -37,6 +38,23 @@ export function loadSettings(): NewGameSettings {
 export function saveSettings(settings: NewGameSettings) {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  } catch {
+    // 浏览器禁用了本地存储时忽略
+  }
+}
+
+/** 是否打开「走一步分析一步」。 */
+export function loadLiveAnalysis(): boolean {
+  try {
+    return localStorage.getItem(LIVE_ANALYSIS_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function saveLiveAnalysis(on: boolean) {
+  try {
+    localStorage.setItem(LIVE_ANALYSIS_KEY, on ? "1" : "0");
   } catch {
     // 浏览器禁用了本地存储时忽略
   }

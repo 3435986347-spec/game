@@ -5,13 +5,15 @@ import type { Arrow } from "./Board";
 import ExplorerPanel from "./ExplorerPanel";
 import MoveList from "./MoveList";
 import { ApiError, RESULT_TEXT, api, errorText } from "./api";
-import type { GameRecord, Mode } from "./api";
+import type { GameRecord, Mode, ReviewMove, Side } from "./api";
 import { positionFromFen, sideToMove } from "./fen";
 import { isTypingTarget } from "./keyboard";
+import ReviewPanel, { MoveReview, useLlmStatus } from "./ReviewPanel";
 import { gameHash, libraryBackHash, navigate } from "./router";
 import { loadSettings, saveGameId } from "./settings";
 import { useAnalysis } from "./useAnalysis";
 import { useEngineStatus } from "./useEngineStatus";
+import { useReview } from "./useReview";
 
 const noMove = () => {};
 
@@ -34,6 +36,9 @@ export default function GameViewer({ id, initialPly }: GameViewerProps) {
   const [copied, setCopied] = useState(false);
   const { engine, checkFailed: engineCheckFailed, check: checkEngine } = useEngineStatus();
   const engineReady = engine?.ok ?? false;
+  const review = useReview(id);
+  const llm = useLlmStatus();
+  const report = review.view?.status === "done" ? review.view.report : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -97,17 +102,18 @@ export default function GameViewer({ id, initialPly }: GameViewerProps) {
     false,
   );
 
-  // 从当前这步开始一盘新对局，切换到对弈页面
-  const startFromHere = async (mode: Mode) => {
-    if (!record || !fen) return;
+  // 从第 n 步之后的局面开始一盘新对局，切换到对弈页面。和 AI 下时你执该局面轮到的一方
+  const startFrom = async (n: number, mode: Mode) => {
+    if (!record) return;
     const settings = loadSettings();
+    const side: Side = sideToMove(record.fens[n]);
     setBusy(true);
     try {
       const game = await api.newGame({
         mode,
         fen: record.initial_fen,
-        moves: playedMoves,
-        user_side: mode === "vs_ai" ? sideToMove(fen) : settings.user_side,
+        moves: record.moves.slice(0, n).map((m) => m.iccs),
+        user_side: mode === "vs_ai" ? side : settings.user_side,
         ai_level: settings.ai_level,
       });
       saveGameId(game.id);
@@ -117,6 +123,9 @@ export default function GameViewer({ id, initialPly }: GameViewerProps) {
       setBusy(false);
     }
   };
+  const startFromHere = (mode: Mode) => startFrom(ply, mode);
+  // 复盘的「再试一次」：回到这步之前，由走这步的一方和 AI 重新下
+  const retry = (move: ReviewMove) => startFrom(move.ply - 1, "vs_ai");
 
   const remove = async () => {
     if (!record) return;
@@ -173,9 +182,11 @@ export default function GameViewer({ id, initialPly }: GameViewerProps) {
     <main className="layout">
       <section className="board-column">
         <div className="board-panel">
-          {analysisOn && engineReady && (
+          {analysisOn && engineReady ? (
             <EvalBar redWin={analysis.info?.lines[0]?.red_win ?? null} flipped={flipped} />
-          )}
+          ) : report ? (
+            <EvalBar redWin={report.curve[ply] ?? null} flipped={flipped} />
+          ) : null}
           <Board position={position} flipped={flipped} onMove={noMove} interactive={false} arrows={arrows} />
         </div>
         <div className="viewer-nav">
@@ -222,15 +233,26 @@ export default function GameViewer({ id, initialPly }: GameViewerProps) {
           {record.source && <p className="muted small">来源：{record.source}</p>}
         </div>
 
-        <div className="card">
-          <h2>棋谱库统计</h2>
-          <ExplorerPanel fen={fen} played={record.moves[ply]?.iccs ?? null} ply={ply} />
-        </div>
+        {record.moves.length > 0 && (
+          <ReviewPanel review={review} llm={llm} ply={ply} engineReady={engineReady} busy={busy}
+            onGo={go} onRetry={(m) => void retry(m)} />
+        )}
+
+        {report && ply > 0 && report.moves[ply - 1] && (
+          <MoveReview llm={llm} move={report.moves[ply - 1]} loading={review.explaining === ply}
+            busy={review.explaining !== null} onExplain={(refresh) => void review.explain(ply, refresh)} />
+        )}
 
         <div className="card moves">
           <h2>着法</h2>
           <MoveList moves={record.moves} firstMover={sideToMove(record.initial_fen)}
-            currentIndex={ply - 1} onSelect={(i) => go(i + 1)} emptyText="这盘棋没有着法记录。" />
+            currentIndex={ply - 1} onSelect={(i) => go(i + 1)} emptyText="这盘棋没有着法记录。"
+            grades={report?.moves.map((m) => m.grade)} />
+        </div>
+
+        <div className="card">
+          <h2>棋谱库统计</h2>
+          <ExplorerPanel fen={fen} played={record.moves[ply]?.iccs ?? null} ply={ply} />
         </div>
 
         <div className="card engine">

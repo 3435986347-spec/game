@@ -26,16 +26,19 @@ from ..core import (
 )
 from ..core.fen import piece_to_letter
 from ..core.notation import BLACK_NAME, RED_NAME
+from ..core.variation import pv_to_chinese
 from ..engine import (
     AnalysisResult,
     EngineError,
     EngineService,
     EngineUnavailable,
     Limit,
+    UciEngine,
     choose_move,
     get_level,
 )
 from ..library import Library, my_game_headers
+from ..training import PositionEval, direction_hint
 from .schemas import (
     GameView,
     HintRequest,
@@ -72,6 +75,10 @@ class Game:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # 同一对局的操作依次执行
     # 提示的分析结果，按「完整着法历史」缓存：同一局面、同一历史才复用
     _hint_cache: tuple[tuple[str, ...], AnalysisResult] | None = None
+    # 边下边分析：局面评估（键为走到这个局面的全部着法）和讲解（键为到这步为止的全部着法）。
+    # 按着法历史作键，悔棋后走了别的着法也不会用错
+    position_evals: dict[tuple[str, ...], PositionEval] = field(default_factory=dict)
+    move_explanations: dict[tuple[str, ...], dict] = field(default_factory=dict)
 
     @classmethod
     def create(cls, body: NewGameRequest, rules: RuleConfig) -> Game:
@@ -205,33 +212,19 @@ def _side_name(side: int) -> str:
     return "red" if side == RED else "black"
 
 
-def pv_to_chinese(pos: Position, pv: list[str], limit: int = 8) -> list[str]:
-    """把引擎主要变化（ICCS）转成中文记谱，遇到不合法的着法就停止。"""
-    p = pos.copy()
-    out: list[str] = []
-    for text in pv[:limit]:
-        try:
-            move = parse_iccs(text)
-        except NotationError:
-            break
-        if not p.is_legal(move):
-            break
-        out.append(move_to_chinese(p.board, move))
-        p.push(move)
-    return out
-
-
 def red_expected(score: float, turn: int) -> float:
     """走棋方视角的期望得分 → 红方视角。"""
     return score if turn == RED else 1.0 - score
 
 
 async def run_engine(coro_factory):
-    """调用引擎，把不可用 / 出错转换成 503，信息直接给用户看。"""
+    """调用引擎，把不可用 / 出错 / 超时转换成 503，信息直接给用户看。"""
     try:
         return await coro_factory()
     except (EngineUnavailable, EngineError) as e:
         raise HTTPException(503, str(e)) from e
+    except TimeoutError as e:
+        raise HTTPException(503, "引擎响应超时，请稍后再试") from e
 
 
 router = APIRouter(prefix="/api/games", tags=["对局"])
@@ -333,9 +326,32 @@ async def ai_move(game_id: str, request: Request) -> GameView:
         return game.view()
 
 
+async def _hint_analysis(
+    request: Request, game: Game, engine: UciEngine | None = None
+) -> AnalysisResult:
+    """提示用的引擎分析，按完整着法历史缓存（同一局面先要 1 级、再要 3 级时不重复计算）。
+    不传 engine 时按需启动对局引擎。引擎不可用时抛 EngineUnavailable / EngineError；
+    给不出合法着法时抛 EngineError。"""
+    history = tuple(game.move_list)
+    if game._hint_cache is not None and game._hint_cache[0] == history:
+        return game._hint_cache[1]
+    engines = _engines(request)
+    engine = engine or await engines.player()
+    movetime = engines.config.hint_movetime_ms if engines.config else 1000
+    analysis = await engine.analyse(
+        game.initial_fen, game.move_list, limit=Limit(movetime_ms=movetime), multipv=1
+    )
+    if not analysis.lines or not _is_legal_text(game.position, analysis.lines[0].move):
+        game._hint_cache = None
+        raise EngineError("引擎没有给出合法的着法，请检查 config.toml 中 [engine] 的 flavor")
+    game._hint_cache = (history, analysis)
+    return analysis
+
+
 @router.post("/{game_id}/hint", response_model=HintView)
 async def hint(game_id: str, body: HintRequest, request: Request) -> HintView:
-    """2 级提示：该动哪个子；3 级提示：具体着法、主要变化和走完后的胜率。"""
+    """1 级提示：只指出方向（不泄露着法；没有引擎也能用）；2 级提示：该动哪个子；
+    3 级提示：具体着法、主要变化和走完后的胜率。"""
     game = _get(request, game_id)
     async with game.lock:
         if game.result() is not None:
@@ -343,27 +359,21 @@ async def hint(game_id: str, body: HintRequest, request: Request) -> HintView:
         if game.ai_to_move:
             raise HTTPException(400, "现在轮到 AI 走棋")
         pos = game.position
-        history = tuple(game.move_list)
-        if game._hint_cache is not None and game._hint_cache[0] == history:
-            analysis = game._hint_cache[1]
-        else:
-            engines = _engines(request)
-            engine = await run_engine(engines.player)
-            movetime = engines.config.hint_movetime_ms if engines.config else 1000
-            analysis = await run_engine(
-                lambda: engine.analyse(
-                    game.initial_fen, game.move_list, limit=Limit(movetime_ms=movetime), multipv=1
-                )
-            )
-        if not analysis.lines or not _is_legal_text(pos, analysis.lines[0].move):
-            game._hint_cache = None
-            raise HTTPException(
-                503, "引擎没有给出合法的着法，请检查 config.toml 中 [engine] 的 flavor"
-            )
-        game._hint_cache = (history, analysis)
-        best = analysis.lines[0]
+        if body.level == 1:
+            # 方向提示不依赖引擎：只在对局引擎已经在运行时借用它判断「主题」，
+            # 不为它启动引擎（引擎有问题时启动可能要等很久）
+            best = None
+            engine = _engines(request).running("player")
+            if engine is not None:
+                try:
+                    best = (await _hint_analysis(request, game, engine)).lines[0].move
+                except (EngineUnavailable, EngineError, TimeoutError):
+                    pass  # 引擎出错时只用规则引擎的特征
+            game.hints_used += 1
+            return HintView(level=1, text=direction_hint(pos, best))
+        analysis = await run_engine(lambda: _hint_analysis(request, game))
         game.hints_used += 1
-        return _hint_view(pos, best, body.level)
+        return _hint_view(pos, analysis.lines[0], body.level)
 
 
 def _is_legal_text(pos: Position, text: str) -> bool:

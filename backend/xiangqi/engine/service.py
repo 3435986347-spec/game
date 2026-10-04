@@ -1,8 +1,9 @@
 """引擎服务：按配置启动两个引擎实例。
 
 - player：人机对战走棋、提示；
-- analyser：实时分析（评估条），可以和 player 同时运行，互不阻塞。
-两者都在第一次使用时才启动；进程意外退出后，下次使用时自动重启。
+- analyser：实时分析（评估条），可以和 player 同时运行，互不阻塞；
+- reviewer：整盘复盘的后台分析，复盘时照样可以下棋、看实时分析。
+都在第一次使用时才启动；进程意外退出后，下次使用时自动重启。
 """
 
 from __future__ import annotations
@@ -55,6 +56,14 @@ class EngineService:
 
     async def analyser(self) -> UciEngine:
         return await self._get("analyser")
+
+    async def reviewer(self) -> UciEngine:
+        return await self._get("reviewer")
+
+    def running(self, role: str) -> UciEngine | None:
+        """已经启动且还活着的引擎实例；没有时返回 None（不会去启动它）。"""
+        engine = self._engines.get(role)
+        return engine if engine is not None and engine.alive else None
 
     async def status(self) -> dict[str, object]:
         """检查引擎能否启动，供界面显示。"""

@@ -63,12 +63,16 @@ class MoveRequest(BaseModel):
 
 
 class HintRequest(BaseModel):
-    level: Literal[2, 3] = Field(description="2：只提示该动哪个子；3：给出具体着法和主要变化")
+    level: Literal[1, 2, 3] = Field(
+        description="1：只指出方向（不泄露着法）；2：提示该动哪个子；3：给出具体着法和主要变化"
+    )
 
 
 class HintView(BaseModel):
     level: int
-    from_square: str = Field(description="该动的棋子所在格（ICCS 坐标，如 h0）")
+    from_square: str | None = Field(
+        default=None, description="该动的棋子所在格（ICCS 坐标，如 h0）；1 级提示为 null"
+    )
     move: str | None = Field(default=None, description="推荐着法（仅 3 级提示）")
     cn: str | None = None
     pv_cn: list[str] | None = Field(default=None, description="主要变化（仅 3 级提示）")
@@ -170,4 +174,99 @@ class OpeningCount(BaseModel):
 
 
 class SavedGame(BaseModel):
+    library_id: int
+
+
+# ---- 讲解与复盘 ----
+
+Grade = Literal["妙着", "好棋", "可以", "缓着", "失误", "漏着"]
+
+
+class LLMStatusView(BaseModel):
+    provider: str = Field(description="none | claude | openai_compat")
+    model: str | None
+    ready: bool = Field(description="配置齐全（不代表 Key 一定有效：检查时不实际调用大模型）")
+    problem: str | None
+    level: str = Field(description="学生水平，决定讲解深浅")
+
+
+class ExplanationView(BaseModel):
+    headline: str
+    why: str
+    better: str
+    principle: str
+    tags: list[str]
+    source: Literal["llm", "template"] = Field(description="大模型讲解，或模板讲解")
+    provider: str | None = None
+    model: str | None = None
+    note: str | None = Field(default=None, description="使用模板讲解的原因")
+
+
+class ReviewMove(BaseModel):
+    ply: int = Field(description="第几步（从 1 开始）；走完这步后的局面序号")
+    iccs: str
+    cn: str
+    side: Side
+    grade: Grade
+    phase: str
+    win_before: float = Field(description="走棋方视角：走这步之前（按引擎最佳着法）的期望得分")
+    win_after: float = Field(description="走棋方视角：走完这步之后的期望得分")
+    drop: float = Field(description="期望得分下降（走了引擎最佳着法时为 0）")
+    best_move: str | None = Field(description="引擎在走这步之前推荐的着法（ICCS）")
+    best_cn: str | None
+    best_pv_cn: list[str]
+    explanation: ExplanationView | None
+
+
+class MoveAnalysisView(ReviewMove):
+    """边下边分析：对局中一步棋的评级。"""
+
+    red_win: float = Field(description="走完这步之后红方的期望得分")
+    terminal: str | None = Field(default=None, description="走完这步棋局结束时的说明")
+
+
+class SideStats(BaseModel):
+    moves: int
+    accuracy: float | None = Field(description="准确率 0–100")
+    phases: dict[str, float | None] = Field(description="开局 / 中局 / 残局各自的准确率")
+    grades: dict[str, int]
+
+
+class TagCount(BaseModel):
+    tag: str
+    count: int
+
+
+class ReviewReport(BaseModel):
+    engine: str | None
+    movetime_ms: int | None
+    created_at: str
+    focus: list[Side] = Field(description="关注的一方：自己的对局只看自己，棋谱库的对局看双方")
+    curve: list[float] = Field(description="curve[i]：走了 i 步之后红方的期望得分")
+    terminal: str | None = Field(description="终局说明")
+    moves: list[ReviewMove]
+    stats: dict[str, SideStats] = Field(description="red / black")
+    key_moments: list[int] = Field(description="关键时刻（步数），最多 3 个")
+    tags: list[TagCount] = Field(description="关键时刻讲解中出现的问题标签")
+
+
+class ReviewView(BaseModel):
+    game_id: int
+    status: Literal["none", "running", "done", "error"]
+    phase: str | None = Field(default=None, description="analysing（引擎分析）| explaining（讲解）")
+    progress: int = 0
+    total: int = 0
+    error: str | None = None
+    report: ReviewReport | None = None
+
+
+class StartReviewRequest(BaseModel):
+    force: bool = Field(default=False, description="已有复盘时重新分析")
+
+
+class ExplainRequest(BaseModel):
+    ply: int = Field(ge=1, description="讲解第几步")
+
+
+class GameReviewStarted(BaseModel):
     library_id: int
