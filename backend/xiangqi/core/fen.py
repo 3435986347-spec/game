@@ -58,7 +58,7 @@ def parse_fen(fen: str) -> tuple[list[int], int, int, int]:
     for i, row in enumerate(rows):
         rank, file = 9 - i, 0
         for ch in row:
-            if ch.isdigit():
+            if ch in "123456789":  # 不用 isdigit()：它对 ①、² 等字符也返回 True
                 file += int(ch)
                 continue
             if file >= 9:

@@ -137,8 +137,9 @@ export default function PlayPage() {
   );
 
   const busy = thinking || hintLoading;
-  const canUndo = !!game && game.moves.length > 0 && !busy &&
-    !(game.mode === "vs_ai" && game.moves.length === 1 && game.moves[0].by_ai);
+  // 与后端一致：人机对战轮到你走时，一次撤回双方各一步（从棋谱某一步开始时，之前的着法也算）
+  const canUndo = !!game && !!pos && !busy &&
+    game.moves.length >= (game.mode === "vs_ai" && pos.turn === game.user_side ? 2 : 1);
   const undo = useCallback(() => {
     if (game && canUndo) void run(() => api.undo(game.id));
   }, [game, canUndo, run]);

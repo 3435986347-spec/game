@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +39,7 @@ class ImportJob:
     done: bool = False
     error: str | None = None
     task: asyncio.Task | None = None  # 保留引用，避免后台任务被回收
+    cancel: threading.Event = field(default_factory=threading.Event)  # 服务停止时中止导入
 
     def view(self) -> ImportJobView:
         r = self.report
@@ -61,7 +63,9 @@ def _library(request: Request) -> Library:
 def _run_import(library: Library, job: ImportJob, path: Path) -> None:
     try:
         text = decode_bytes(path.read_bytes())
-        library.import_games(iter_games(text), source=job.filename, report=job.report)
+        library.import_games(
+            iter_games(text), source=job.filename, report=job.report, cancel=job.cancel
+        )
     except Exception as e:  # 文件无法读取等：整个任务失败，原因显示给用户
         job.error = f"导入失败：{e}"
     finally:
@@ -74,10 +78,14 @@ async def start_import(request: Request, filename: str = Query("棋谱")) -> Imp
     """请求体是原始文件内容（application/octet-stream）。在后台导入，用返回的 job_id 查询进度。"""
     fd, tmp = tempfile.mkstemp(prefix="xiangqi-import-", suffix=Path(filename).suffix)
     size = 0
-    with os.fdopen(fd, "wb") as f:
-        async for chunk in request.stream():
-            f.write(chunk)
-            size += len(chunk)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            async for chunk in request.stream():
+                f.write(chunk)
+                size += len(chunk)
+    except BaseException:  # 上传中断等：删掉写了一半的临时文件
+        Path(tmp).unlink(missing_ok=True)
+        raise
     if size == 0:
         Path(tmp).unlink(missing_ok=True)
         raise HTTPException(400, "文件是空的")
@@ -87,6 +95,14 @@ async def start_import(request: Request, filename: str = Query("棋谱")) -> Imp
         asyncio.to_thread(_run_import, _library(request), job, Path(tmp))
     )
     return ImportStarted(job_id=job.job_id)
+
+
+async def stop_imports(jobs: dict[str, ImportJob]) -> None:
+    """服务停止时调用：让正在进行的导入尽快结束（已导入的对局保留），并等它们退出。"""
+    running = [job for job in jobs.values() if job.task is not None and not job.done]
+    for job in running:
+        job.cancel.set()
+    await asyncio.gather(*(job.task for job in running), return_exceptions=True)
 
 
 @router.get("/import/{job_id}", response_model=ImportJobView)

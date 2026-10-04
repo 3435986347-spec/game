@@ -27,22 +27,26 @@ class RawGame:
 
 
 def decode_bytes(data: bytes) -> str:
-    """UTF-8（有无 BOM）、UTF-16（有 BOM），否则按 GB18030（兼容 GBK / GB2312）解码。"""
+    """UTF-8（有无 BOM）、UTF-16（有 BOM），否则按 GB18030（兼容 GBK / GB2312）解码。
+    几个文件直接拼接时中间也会有 BOM，一并去掉。"""
     if data.startswith(codecs.BOM_UTF8):
-        return data[len(codecs.BOM_UTF8) :].decode("utf-8", errors="replace")
-    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
-        return data.decode("utf-16", errors="replace")
-    try:
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
-        return data.decode("gb18030", errors="replace")
+        text = data[len(codecs.BOM_UTF8) :].decode("utf-8", errors="replace")
+    elif data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        text = data.decode("utf-16", errors="replace")
+    else:
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text = data.decode("gb18030", errors="replace")
+    return text.replace("\ufeff", "")
 
 
 # ---------------------------------------------------------------------------
 # 切分对局与标签
 # ---------------------------------------------------------------------------
 
-_TAG_RE = re.compile(r'^\[\s*([A-Za-z0-9_]+)\s+"((?:[^"\\]|\\.)*)"\s*\]$')
+# 值按贪婪匹配：有的软件不转义值里的双引号，如 [Event "第一届"棋王"赛"]
+_TAG_RE = re.compile(r'^\[\s*([A-Za-z0-9_]+)\s+"(.*)"\s*\]$')
 
 
 def split_games(text: str) -> list[RawGame]:
@@ -60,7 +64,8 @@ def iter_games(text: str) -> Iterator[RawGame]:
         stripped = line.strip()
         tag = None if in_comment else _TAG_RE.match(stripped)
         if tag:
-            if any(part.strip() for part in body):  # 上一局的正文已经结束
+            # 上一局的正文已经结束；或者同一个标签又出现了——上一局只有标签、没有着法
+            if any(part.strip() for part in body) or tag.group(1) in headers:
                 for game in _make_games(headers, body, index):
                     index = game.index
                     yield game
@@ -78,11 +83,14 @@ def _unescape(value: str) -> str:
 
 
 def _comment_state(line: str, in_comment: bool) -> bool:
+    """这一行结束时是否还在 {注释} 里。规则与 _strip_annotations 一致：; 之后是行注释。"""
     for ch in line:
-        if ch == "{":
+        if in_comment:
+            in_comment = ch != "}"
+        elif ch == "{":
             in_comment = True
-        elif ch == "}":
-            in_comment = False
+        elif ch == ";":
+            break
     return in_comment
 
 
@@ -102,10 +110,14 @@ def _make_games(headers: dict[str, str], body: list[str], last_index: int) -> It
 _RESULTS = {"1-0": "1-0", "0-1": "0-1", "1/2-1/2": "1/2-1/2", "½-½": "1/2-1/2", "*": "*"}
 # 有的软件在着法后面直接写中文结果
 _RESULT_WORDS = {
-    "红胜": "1-0", "红先胜": "1-0", "红方胜": "1-0", "黑负": "1-0",
-    "黑胜": "0-1", "黑先胜": "0-1", "黑方胜": "0-1", "红负": "0-1", "红先负": "0-1",
-    "和": "1/2-1/2", "和棋": "1/2-1/2", "红先和": "1/2-1/2", "黑先和": "1/2-1/2",
+    "红胜": "1-0", "红先胜": "1-0", "红方胜": "1-0",
+    "黑负": "1-0", "黑方负": "1-0", "黑先负": "1-0",
+    "黑胜": "0-1", "黑先胜": "0-1", "黑方胜": "0-1",
+    "红负": "0-1", "红方负": "0-1", "红先负": "0-1",
+    "和": "1/2-1/2", "和棋": "1/2-1/2", "和局": "1/2-1/2", "平局": "1/2-1/2",
+    "红先和": "1/2-1/2", "黑先和": "1/2-1/2",
 }  # fmt: skip
+RESULT_TOKENS = {**_RESULTS, **_RESULT_WORDS}  # 结果标记 → 1-0 / 0-1 / 1/2-1/2 / *
 
 _PIECE = "车車俥伡马馬傌炮砲包相象仕士帅帥将將兵卒"
 _NUM = "一二三四五六七八九1-9１-９"
@@ -137,10 +149,12 @@ def tokenize_segments(text: str) -> list[tuple[list[str], str | None]]:
         token = token.strip().rstrip(_QUALITY_MARKS)
         if not token:
             continue
-        result = _RESULTS.get(token) or _RESULT_WORDS.get(token)
+        result = RESULT_TOKENS.get(token)
         if result is not None:
-            segments.append((moves, result))
-            moves = []
+            if moves or not segments:
+                segments.append((moves, result))
+                moves = []
+            # 否则是紧跟在结果后面的又一个结果标记（如「1-0 红胜」），不是新的一局
             continue
         if _MOVE_NUMBER.fullmatch(token) or token.isdigit():
             continue

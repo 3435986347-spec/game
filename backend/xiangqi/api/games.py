@@ -67,7 +67,7 @@ class Game:
     records: list[MoveRecord] = field(default_factory=list)
     hints_used: int = 0
     library_id: int | None = None  # 保存到棋谱库后的 id
-    saved_ply: int | None = None  # 保存时走到第几步（避免重复保存）
+    saved: tuple[tuple[str, ...], str] | None = None  # 上次保存的（着法, 结果），避免重复保存
     rng: random.Random = field(default_factory=random.Random)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # 同一对局的操作依次执行
     # 提示的分析结果，按「完整着法历史」缓存：同一局面、同一历史才复用
@@ -126,10 +126,12 @@ class Game:
         self.records.append(record)
 
     def undo(self) -> None:
-        """悔棋。人机对战时撤回到轮到你走，并且至少撤掉你自己的一步。"""
+        """悔棋。人机对战时撤回到轮到你走，并且至少撤掉你这一方的一步。
+        按轮到哪一方判断，而不是看着法是不是 AI 走的：从棋谱某一步开始的对局，
+        之前的着法双方都不是 AI 走的。"""
         count = 1
-        if self.mode == "vs_ai" and self.records and self.records[-1].by_ai:
-            count = 2
+        if self.mode == "vs_ai" and self.position.turn != self.ai_side:
+            count = 2  # 轮到你走：撤掉对方的上一步和你的上一步
         if count > len(self.records):
             raise GameError("没有可以悔的棋")
         for _ in range(count):
@@ -165,12 +167,16 @@ class Game:
         )
 
 
-def save_to_library(game: Game, library: Library) -> int:
-    """把对局保存（或更新）到棋谱库，返回库中的 id。"""
+def _result_code(game: Game) -> str:
     result = game.result()
-    code = "*"
-    if result is not None:
-        code = {RED: "1-0", BLACK: "0-1", None: "1/2-1/2"}[result.winner]
+    if result is None:
+        return "*"
+    return {RED: "1-0", BLACK: "0-1", None: "1/2-1/2"}[result.winner]
+
+
+def save_to_library(game: Game, library: Library) -> int:
+    """把对局保存（或更新）到棋谱库，返回库中的 id。会访问数据库，在线程中调用。"""
+    code = _result_code(game)
     user_side = None if game.ai_side is None else _side_name(-game.ai_side)
     headers = my_game_headers(mode=game.mode, ai_level=game.ai_level, user_side=user_side)
     game.library_id = library.save_game(
@@ -180,17 +186,19 @@ def save_to_library(game: Game, library: Library) -> int:
         headers=headers,
         library_id=game.library_id,
     )
-    game.saved_ply = len(game.records)
+    game.saved = (tuple(game.move_list), code)
     return game.library_id
 
 
-def _autosave(request: Request, game: Game) -> None:
+async def _autosave(request: Request, game: Game) -> None:
     """棋局结束时自动保存到棋谱库（悔棋后再下完会更新同一条记录）。"""
-    if game.result() is not None and game.saved_ply != len(game.records):
-        try:
-            save_to_library(game, request.app.state.library)
-        except sqlite3.Error:
-            logger.exception("自动保存对局失败")
+    if game.result() is None or game.saved == (tuple(game.move_list), _result_code(game)):
+        return
+    try:
+        # 数据库可能正被导入占用写锁，放到线程里等，不阻塞其他请求
+        await asyncio.to_thread(save_to_library, game, request.app.state.library)
+    except sqlite3.Error:
+        logger.exception("自动保存对局失败")
 
 
 def _side_name(side: int) -> str:
@@ -271,7 +279,7 @@ async def play_move(game_id: str, body: MoveRequest, request: Request) -> GameVi
             game.play(body.move)
         except (NotationError, GameError) as e:
             raise HTTPException(400, str(e)) from e
-        _autosave(request, game)
+        await _autosave(request, game)
         return game.view()
 
 
@@ -291,7 +299,11 @@ async def save_game(game_id: str, request: Request) -> SavedGame:
     """手动把（未下完的）对局保存到棋谱库；再次保存会更新同一条记录。"""
     game = _get(request, game_id)
     async with game.lock:
-        return SavedGame(library_id=save_to_library(game, request.app.state.library))
+        try:
+            library_id = await asyncio.to_thread(save_to_library, game, request.app.state.library)
+        except sqlite3.Error as e:
+            raise HTTPException(503, f"保存失败（棋谱库正忙或无法写入）：{e}") from e
+        return SavedGame(library_id=library_id)
 
 
 @router.post("/{game_id}/ai-move", response_model=GameView)
@@ -313,11 +325,11 @@ async def ai_move(game_id: str, request: Request) -> GameView:
             raise HTTPException(500, "引擎没有给出着法")
         try:
             game.play_ai(move)
-            _autosave(request, game)
         except NotationError as e:
             raise HTTPException(
                 503, f"引擎给出了不合法的着法 {move}，请检查 config.toml 中 [engine] 的 flavor"
             ) from e
+        await _autosave(request, game)
         return game.view()
 
 

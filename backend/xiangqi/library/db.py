@@ -6,6 +6,7 @@
 - positions：局面索引，只记录每局前 index_plies 步。key 为 Zobrist 哈希（含走棋方），
   next_move 为这个局面下实际走的下一步（from * 90 + to；终局为 NULL）。用于局面检索和开局统计。
 每个线程用自己的连接（导入在后台线程进行），数据库为 WAL 模式，导入时也可以正常查询。
+导入时最多约 1 秒提交一次，写锁不会长时间占着，导入期间保存对局只需稍等。
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -117,6 +119,8 @@ class Library:
         self.index_plies = index_plies
         self._local = threading.local()
         self._memory_conn: sqlite3.Connection | None = None
+        self._conns: list[sqlite3.Connection] = []  # 各线程打开的连接，close() 时统一关闭
+        self._conns_lock = threading.Lock()
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
@@ -139,6 +143,8 @@ class Library:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
+        with self._conns_lock:
+            self._conns.append(conn)
         return conn
 
     def _init_schema(self) -> None:
@@ -160,32 +166,42 @@ class Library:
         progress: Callable[[ImportReport], None] | None = None,
         batch_size: int = 500,
         report: ImportReport | None = None,
+        cancel: threading.Event | None = None,
     ) -> ImportReport:
         """校验并导入棋谱。不合法的对局跳过并记录原因；重复的对局（见 _content_hash）跳过。
-        传入 report 时就地更新它（其他线程可以随时读取进度）。"""
+        传入 report 时就地更新它（其他线程可以随时读取进度）。
+        cancel 被设置时停止导入，已导入的对局保留。出现意外错误时撤销尚未提交的部分再抛出。"""
         report = report if report is not None else ImportReport()
         conn = self.connect()
-        pending = 0
-        for raw in raw_games:
-            report.games_seen += 1
-            try:
-                parsed = resolve_game(raw)
-            except GameFormatError as e:
-                report.add_error(raw, str(e))
-            else:
-                if not parsed.moves:
-                    report.add_error(raw, "没有着法")
-                elif self._insert(conn, parsed, kind="library", source=source) is None:
-                    report.duplicates += 1
+        pending = 0  # 已写入、尚未提交的对局数
+        last_commit = time.monotonic()
+        try:
+            for raw in raw_games:
+                if cancel is not None and cancel.is_set():
+                    break
+                report.games_seen += 1
+                try:
+                    parsed = resolve_game(raw)
+                except GameFormatError as e:
+                    report.add_error(raw, str(e))
                 else:
-                    report.imported += 1
-                    pending += 1
-            if pending >= batch_size:
-                conn.commit()
-                pending = 0
-            if progress is not None and report.games_seen % 200 == 0:
-                progress(report)
-        conn.commit()
+                    if not parsed.moves:
+                        report.add_error(raw, "没有着法")
+                    elif self._insert(conn, parsed, kind="library", source=source) is None:
+                        report.duplicates += 1
+                    else:
+                        report.imported += 1
+                        pending += 1
+                if pending and (pending >= batch_size or time.monotonic() - last_commit > 1.0):
+                    conn.commit()
+                    pending, last_commit = 0, time.monotonic()
+                if progress is not None and report.games_seen % 200 == 0:
+                    progress(report)
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            report.imported -= pending  # 这些没有写进库
+            raise
         if progress is not None:
             progress(report)
         return report
@@ -201,6 +217,11 @@ class Library:
     ) -> int | None:
         row = _game_row(parsed)
         row.update(kind=kind, source=source, content_hash=content_hash or _content_hash(row))
+        # 先查一下是否重复：只读查询不会开启写事务，重复导入时不占写锁
+        if conn.execute(
+            "SELECT 1 FROM games WHERE content_hash = ?", (row["content_hash"],)
+        ).fetchone():
+            return None
         columns = ", ".join(row)
         placeholders = ", ".join(f":{name}" for name in row)
         cur = conn.execute(f"INSERT OR IGNORE INTO games ({columns}) VALUES ({placeholders})", row)
@@ -280,11 +301,11 @@ class Library:
     ) -> tuple[int, list[dict]]:
         where, params = [], []
         if q:
-            where.append("(red LIKE ? OR black LIKE ?)")
-            params += [f"%{q}%", f"%{q}%"]
+            where.append("(red LIKE ? ESCAPE '\\' OR black LIKE ? ESCAPE '\\')")
+            params += [_contains(q), _contains(q)]
         if event:
-            where.append("event LIKE ?")
-            params.append(f"%{event}%")
+            where.append("event LIKE ? ESCAPE '\\'")
+            params.append(_contains(event))
         if opening:
             where.append("opening = ?")
             params.append(opening)
@@ -378,11 +399,18 @@ class Library:
         return [dict(row) for row in rows]
 
     def close(self) -> None:
-        for conn in (getattr(self._local, "conn", None), self._memory_conn):
-            if conn is not None:
-                conn.close()
+        with self._conns_lock:
+            conns, self._conns = self._conns, []
+        for conn in conns:
+            conn.close()
         self._local = threading.local()
         self._memory_conn = None
+
+
+def _contains(text: str) -> str:
+    """LIKE 的「包含」模式；输入里的 % 和 _ 按字面匹配。"""
+    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
 
 
 def _content_hash(row: dict[str, object]) -> str:

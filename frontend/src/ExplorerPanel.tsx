@@ -78,7 +78,7 @@ export default function ExplorerPanel({ fen, played = null, ply }: ExplorerPanel
           : "棋谱库中没有对局到达这个局面"}
         <span className="muted small"> · 只统计每局前 {data.indexed_plies} 步</span>
       </p>
-      {ply !== undefined && ply >= data.indexed_plies && (
+      {ply !== undefined && ply > data.indexed_plies && (
         <p className="muted small">当前是第 {ply} 步，已超出统计范围。</p>
       )}
       {rows.length > 0 && (

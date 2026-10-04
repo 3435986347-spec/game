@@ -16,13 +16,7 @@ from ..core import (
 )
 from ..core.board import ADVISOR, BISHOP, CANNON, KING, KNIGHT, PAWN, ROOK
 from ..core.notation import BLACK_NAME, RED_NAME, RED_NUM, move_to_iccs
-from .parse import RawGame
-
-_RESULTS = {
-    "1-0": "1-0", "0-1": "0-1", "1/2-1/2": "1/2-1/2", "½-½": "1/2-1/2", "*": "*",
-    "红胜": "1-0", "红先胜": "1-0", "黑胜": "0-1", "红先负": "0-1", "和": "1/2-1/2",
-    "和棋": "1/2-1/2", "红先和": "1/2-1/2",
-}  # fmt: skip
+from .parse import RESULT_TOKENS, RawGame
 
 _ICCS = re.compile(r"^[A-Ia-i][0-9]-?[A-Ia-i][0-9]$")
 _WXF = re.compile(r"^(?:([+-])([A-Za-z])|([A-Za-z])([1-9+-]))([+\-.=])([1-9])$")
@@ -62,14 +56,16 @@ def resolve_game(raw: RawGame) -> ParsedGame:
         pos._push_unchecked(move)  # 已在 _resolve_move 中校验
         moves.append(move_to_iccs(move))
         keys.append(pos.key)
-    result = normalize_result(raw.headers.get("Result")) or raw.result or "*"
+    # [Result] 标签优先；标签是 *（未知）而正文末尾有明确结果时用正文的
+    tag = normalize_result(raw.headers.get("Result"))
+    result = tag if tag not in (None, "*") else raw.result or tag or "*"
     return ParsedGame(raw.headers, initial_fen, moves, result, keys)
 
 
 def normalize_result(value: str | None) -> str | None:
     if value is None:
         return None
-    return _RESULTS.get(value.strip())
+    return RESULT_TOKENS.get(value.strip())
 
 
 def _resolve_move(pos: Position, text: str, ply: int) -> tuple[int, int]:

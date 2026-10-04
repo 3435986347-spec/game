@@ -186,7 +186,10 @@ export default function LibraryPage({ query }: { query: string }) {
             </label>
             <div className="search-buttons">
               <button type="submit" className="primary">搜索</button>
-              <button type="button" onClick={() => go(new URLSearchParams())}>清空条件</button>
+              <button type="button" onClick={() => {
+                setDraft(parseQuery("").filters); // 地址里本来就没有条件时，go() 不会触发重置
+                go(new URLSearchParams());
+              }}>清空条件</button>
             </div>
           </form>
 

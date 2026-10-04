@@ -150,3 +150,35 @@ def test_analysis_of_final_position_reports_no_moves(client):
         )  # 黑方已被将死
         info = ws.receive_json()
     assert info["type"] == "info" and info["lines"] == [] and info["depth"] == 0
+
+
+TWO_MATES = "4k4/R7R/9/9/9/9/9/9/9/3K5 w"  # a8a9 和 i8i9 都是一步杀
+
+
+def test_autosave_updates_after_undo_and_different_finish(client):
+    gid = client.post("/api/games", json={"fen": TWO_MATES}).json()["id"]
+    game = client.post(f"/api/games/{gid}/moves", json={"move": "a8a9"}).json()
+    library_id = game["library_id"]
+    assert library_id is not None
+    client.post(f"/api/games/{gid}/undo")
+    game = client.post(f"/api/games/{gid}/moves", json={"move": "i8i9"}).json()
+    assert game["position"]["result"]["reason"] == "checkmate" and game["library_id"] == library_id
+    record = client.get(f"/api/library/games/{library_id}").json()
+    assert [m["iccs"] for m in record["moves"]] == ["i8i9"]  # 不是悔棋前的 a8a9
+
+
+def test_undo_in_vs_ai_game_from_library_position(client):
+    game = client.post(
+        "/api/games",
+        json={"mode": "vs_ai", "user_side": "red", "moves": ["h2e2", "h9g7", "h0g2", "i9h9"]},
+    ).json()
+    assert game["position"]["turn"] == "red" and game["ai_to_move"] is False
+    game = client.post(f"/api/games/{game['id']}/undo").json()
+    # 撤回到仍然轮到你走，不会把轮次交给 AI
+    assert [m["iccs"] for m in game["moves"]] == ["h2e2", "h9g7"]
+    assert game["position"]["turn"] == "red" and game["ai_to_move"] is False
+
+
+def test_fen_with_unicode_digit_is_rejected(client):
+    fen = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABN① w"
+    assert client.get("/api/library/explorer", params={"fen": fen}).status_code == 400

@@ -28,8 +28,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     library = Library(config.library_db or ":memory:", index_plies=config.library_index_plies)
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI):
+    async def lifespan(app: FastAPI):
         yield
+        await library_api.stop_imports(
+            app.state.import_jobs
+        )  # 中止进行中的导入，否则要等它导完才能退出
         await engines.close()  # 退出时关闭引擎进程
         library.close()
 

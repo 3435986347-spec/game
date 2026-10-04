@@ -899,3 +899,73 @@ def test_random_games_roundtrip(newline):
         assert parsed.initial_fen == START_FEN
         assert parsed.moves == iccs, notations[i]
         assert parsed.result == result
+
+
+# ---------------------------------------------------------------------------
+# 评审发现的问题（回归测试）
+# ---------------------------------------------------------------------------
+
+
+def test_brace_inside_line_comment_does_not_swallow_later_games():
+    text = (
+        '[Event "一"]\n1. h2e2 h9g7 ; 红方可以考虑{炮八平五\n*\n\n'
+        '[Event "二"]\n1. h2e2 *\n\n[Event "三"]\n1. b2e2 *\n'
+    )
+    games = split_games(text)
+    assert [g.headers.get("Event") for g in games] == ["一", "二", "三"]
+    assert [g.moves for g in games] == [["h2e2", "h9g7"], ["h2e2"], ["b2e2"]]
+
+
+def test_header_only_game_is_not_merged_into_next():
+    text = (
+        '[Event "残局"]\n[Red "甲"]\n[FEN "4k4/9/9/9/9/9/9/9/9/3AK4 w - - 0 1"]\n\n'
+        '[Event "对局"]\n[Black "乙"]\n1. h2e2 *\n'
+    )
+    first, second = split_games(text)
+    assert first.moves == [] and first.headers["Red"] == "甲"
+    assert second.headers == {"Event": "对局", "Black": "乙"}
+    assert resolve_game(second).moves == ["h2e2"]
+
+
+@pytest.mark.parametrize(
+    ("word", "result"),
+    [("和局", "1/2-1/2"), ("平局", "1/2-1/2"), ("红方负", "0-1"), ("黑方负", "1-0"),
+     ("黑先负", "1-0"), ("红负", "0-1"), ("黑方胜", "0-1")],
+)  # fmt: skip
+def test_chinese_result_words_in_movetext_and_tag(word, result):
+    (game,) = split_games(f"1. 炮二平五 马8进7 {word}\n")
+    assert resolve_game(game).result == result
+    (game,) = split_games(f'[Result "{word}"]\n1. 炮二平五 马8进7\n')
+    assert resolve_game(game).result == result
+
+
+def test_unescaped_quote_in_tag_value():
+    (game,) = split_games('[Event "第一届"棋王"赛"]\n[Red "甲"]\n1. h2e2 *\n')
+    assert game.headers == {"Event": '第一届"棋王"赛', "Red": "甲"}
+
+
+def test_bom_in_the_middle_of_concatenated_files():
+    one = '[Event "一"]\n1. h2e2 *\n'.encode("utf-8-sig")
+    two = '[Event "二"]\n1. b2e2 *\n'.encode("utf-8-sig")
+    games = split_games(decode_bytes(one + b"\n" + two))
+    assert [g.headers.get("Event") for g in games] == ["一", "二"]
+
+
+def test_second_result_marker_is_not_a_new_game():
+    games = split_games("1. h2e2 h9g7 1-0 红胜\n")
+    assert len(games) == 1 and games[0].result == "1-0"
+
+
+def test_unknown_result_tag_does_not_override_movetext_result():
+    (game,) = split_games('[Result "*"]\n1. h2e2 h9g7 0-1\n')
+    assert resolve_game(game).result == "0-1"
+    (game,) = split_games('[Result "1-0"]\n1. h2e2 h9g7 0-1\n')
+    assert resolve_game(game).result == "1-0"  # 明确的标签仍然优先
+
+
+def test_fen_tag_with_unicode_digit_is_a_format_error():
+    (game,) = split_games(
+        '[FEN "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABN① w"]\n1. h2e2\n'
+    )
+    with pytest.raises(GameFormatError, match="FEN"):
+        resolve_game(game)

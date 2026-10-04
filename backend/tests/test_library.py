@@ -1,7 +1,7 @@
 import pytest
 
 from xiangqi.core import START_FEN, Position, parse_iccs
-from xiangqi.library import Library, split_games
+from xiangqi.library import ImportReport, Library, split_games
 from xiangqi.library.openings import classify
 
 GAMES = """[Event "测试赛"]
@@ -220,3 +220,89 @@ def test_classify_openings(moves, name):
 def test_classify_needs_standard_start():
     assert classify("4k4/9/9/9/9/9/9/9/9/4K4 w - - 0 1", ["e0e1"]) is None
     assert classify(START_FEN, []) is None
+
+
+def many_games(n: int, event: str = "批量") -> str:
+    return "".join(f'[Event "{event}{i}"]\n1. H2-E2 H9-G7 *\n\n' for i in range(n))
+
+
+def test_reimport_does_not_hold_write_lock(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "lib.db"
+    library = Library(db)
+    library.import_games(split_games(many_games(400)))
+    probes = []
+
+    def probe(_report):  # 重复导入进行中，另一个连接要能写
+        other = sqlite3.connect(db, timeout=0.2)
+        try:
+            other.execute("INSERT INTO meta (key, value) VALUES (?, 'x')", (f"probe{len(probes)}",))
+            other.commit()
+            probes.append("ok")
+        except sqlite3.OperationalError as e:
+            probes.append(str(e))
+        finally:
+            other.close()
+
+    report = library.import_games(split_games(many_games(400)), progress=probe)
+    assert report.duplicates == 400 and probes and set(probes) == {"ok"}
+    library.close()
+
+
+def test_failed_import_rolls_back_and_releases_lock(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "lib.db"
+    library = Library(db)
+
+    def games_then_crash():
+        yield from split_games(many_games(3))
+        raise OSError("磁盘出错")
+
+    report = None
+    with pytest.raises(OSError):
+        library.import_games(games_then_crash(), report=(report := ImportReport()))
+    assert report.imported == 0  # 没提交的不算
+    other = sqlite3.connect(db, timeout=0.2)
+    other.execute("INSERT INTO meta (key, value) VALUES ('probe', 'x')")  # 写锁已释放
+    other.commit()
+    other.close()
+    assert library.stats()["games"] == 0
+    library.import_games(split_games(many_games(1, "另一个")))
+    assert library.stats()["games"] == 1  # 之前没提交的对局不会被顺带提交
+    library.close()
+
+
+def test_import_can_be_cancelled():
+    import threading
+
+    library = Library(":memory:")
+    cancel = threading.Event()
+
+    def stop_after_first(report):
+        cancel.set()
+
+    report = library.import_games(
+        split_games(many_games(450)), progress=stop_after_first, cancel=cancel
+    )
+    assert report.games_seen == 200 and library.stats()["games"] == 200  # 已导入的保留
+
+
+def test_search_treats_like_wildcards_literally(lib):
+    assert lib.search(q="_")[0] == 0 and lib.search(q="%")[0] == 0
+    assert lib.search(event="测试%")[0] == 0 and lib.search(event="测试")[0] == 2
+
+
+def test_close_closes_connections_of_all_threads(tmp_path):
+    import sqlite3
+    import threading
+
+    library = Library(tmp_path / "lib.db")
+    conns = []
+    worker = threading.Thread(target=lambda: conns.append(library.connect()))
+    worker.start()
+    worker.join()
+    library.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        conns[0].execute("SELECT 1")
