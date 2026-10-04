@@ -8,7 +8,7 @@
 
 - [x] **M0 项目骨架**：Python 后端（FastAPI）+ React 前端，一条命令启动
 - [x] **M1 规则引擎**：着法生成、将军 / 将死 / 困毙、长将判负、重复局面、自然限着、FEN、中文记谱双向转换；本地自由对弈界面（双方都由你来走）
-- [ ] M2 人机对战（接入 Pikafish 引擎）
+- [x] **M2 人机对战**：接入 Pikafish 引擎，10 级难度、两级提示、实时引擎分析（评估条 + 候选着法）
 - [ ] M3 棋谱库（导入、打谱、局面统计）
 - [ ] M4 大模型讲解 + 复盘
 - [ ] M5 猜着练习、名局解读、错题本
@@ -30,6 +30,44 @@ uv run xiangqi
 
 不用 uv 也可以：在 `backend/` 下 `python -m venv .venv`，激活后 `pip install -e .`，再运行 `python -m xiangqi`。
 
+端口 8000 被占用时（常见原因：之前启动的程序还开着）会自动换用 8001、8002……，终端里会显示实际地址。
+
+**更新代码**：`git pull` 之后，前端有改动要重新 `npm run build`，后端依赖有改动 `uv run` 会自动安装。
+
+没有安装象棋引擎时只能自由对弈；人机对战、提示和引擎分析需要先按下一节安装引擎。
+
+## 安装象棋引擎（Pikafish）
+
+[Pikafish](https://github.com/official-pikafish/Pikafish) 是开源的中国象棋引擎，棋力远超人类。它的神经网络权重文件（`pikafish.nnue`）允许个人非商业使用。
+
+1. **下载**最新版本（一个 `.7z` 压缩包，内含各系统的可执行文件和 `pikafish.nnue`）：
+   - GitHub：<https://github.com/official-pikafish/Pikafish/releases>
+   - 国内访问 GitHub 慢时：官网 <https://www.pikafish.com> 提供蓝奏云下载
+2. **解压**到仓库的 `engines/` 目录（该目录不会提交到仓库），例如 `engines/Pikafish/`。
+   - macOS 解压 `.7z`：用「The Unarchiver」，或 `brew install sevenzip` 后运行 `7zz x Pikafish.xxx.7z -oengines/Pikafish`
+3. **macOS 需要先解除隔离**（否则系统会拦截从网上下载的程序）：
+   ```bash
+   xattr -dr com.apple.quarantine engines/Pikafish
+   chmod +x engines/Pikafish/*/pikafish* 2>/dev/null
+   ```
+4. **自动挑选版本**：压缩包里有针对不同 CPU 的多个版本，下面的命令会逐个试运行，找出能在你电脑上运行的最快版本，并打印要写进配置的内容：
+   ```bash
+   cd backend
+   uv run xiangqi-engine-check ../engines/Pikafish
+   ```
+5. 把打印出的 `[engine]` 配置写进仓库根目录的 `config.toml`，重新运行 `uv run xiangqi`。
+
+如果提示找不到 `pikafish.nnue`：把它复制到可执行文件所在目录，或在 `config.toml` 的 `[engine]` 中设置 `eval_file = "engines/Pikafish/pikafish.nnue"`。
+
+也可以用 [Fairy-Stockfish](https://github.com/fairy-stockfish/Fairy-Stockfish)（大棋盘版本，支持象棋），在 `[engine]` 中设置 `flavor = "fairy-stockfish"`。
+
+## 使用
+
+- **人机对战**：点「新对局」，选择执红或执黑、难度 1–10（1 级启蒙 … 10 级全力）。难度越低，AI 搜索越浅，并且越常走次优着法。各级参数是初始值，觉得不合适可以在 `backend/xiangqi/engine/difficulty.py` 中调整。
+- **提示**：「动哪个子」只高亮该动的棋子，让你自己想走法；「怎么走」给出具体着法（绿色箭头）、后续变化和走完后的期望得分。每局使用提示的次数会记录下来。
+- **引擎分析**：勾选「显示实时分析」后，棋盘左侧出现评估条（红色部分 = 红方期望得分），右侧列出引擎认为最好的 3 步及后续变化，蓝色箭头是当前最佳着法。下棋练习时建议关闭，复盘或研究局面时再打开。
+- **悔棋**：人机对战时一次撤回 AI 和你各一步。快捷键 Ctrl/⌘+Z；按 F 翻转棋盘。
+
 **开发模式**（改前端代码时页面自动刷新）：
 
 ```bash
@@ -37,7 +75,7 @@ cd backend && uv run xiangqi --no-browser   # 终端 1：后端
 cd frontend && npm run dev                  # 终端 2：打开 Vite 显示的地址
 ```
 
-配置在仓库根目录的 `config.toml`（端口、自然限着回合数等）。接口文档：启动后访问 `/docs`。
+配置在仓库根目录的 `config.toml`（端口、引擎、自然限着回合数等）。接口文档：启动后访问 `/docs`。
 
 ## 测试
 
@@ -46,6 +84,9 @@ cd backend
 uv run pytest              # 全部快速测试
 uv run pytest -m slow      # perft 深度 4（约 10 秒）
 uv run ruff check .
+
+# 用真实引擎跑完整对局（可选）
+XIANGQI_TEST_ENGINE=../engines/Pikafish/MacOS/pikafish-apple-silicon uv run pytest tests/test_real_engine.py
 
 cd ../frontend
 npm run typecheck
@@ -61,7 +102,12 @@ backend/xiangqi/core/   规则引擎（纯 Python，无第三方依赖）
   rules.py              胜负判定
   fen.py                FEN 读写、局面合法性检查
   notation.py           ICCS ↔ 中文记谱
-backend/xiangqi/api/    FastAPI 接口
+backend/xiangqi/engine/ 象棋引擎接入
+  uci.py                UCI 协议适配（Pikafish / Fairy-Stockfish）
+  difficulty.py         难度级别与选着
+  service.py            引擎进程管理
+  check.py              xiangqi-engine-check：检查 / 挑选引擎版本
+backend/xiangqi/api/    FastAPI 接口（对局、提示、实时分析 WebSocket）
 backend/tests/          测试
 frontend/src/           React 界面（SVG 棋盘）
 docs/                   技术方案

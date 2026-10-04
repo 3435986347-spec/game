@@ -14,11 +14,23 @@ const PIECE_CHARS: Record<string, string> = {
 };
 const RED_NUM = "零一二三四五六七八九";
 
+export interface Arrow {
+  move: string; // ICCS，如 h0g2
+  kind: "hint" | "analysis";
+}
+
 interface BoardProps {
   position: PositionView;
   flipped: boolean;
   onMove: (iccs: string) => void;
+  /** 为 false 时不能走子（如轮到 AI 走） */
+  interactive?: boolean;
+  /** 需要突出显示的格子（2 级提示：该动的棋子） */
+  highlight?: number | null;
+  arrows?: Arrow[];
 }
+
+const NO_TARGETS = new Map<number, Set<number>>();
 
 /** 格子在画布上的坐标。不翻转时红方在下。 */
 function pointOf(sq: number, flipped: boolean): [number, number] {
@@ -31,12 +43,20 @@ function pointOf(sq: number, flipped: boolean): [number, number] {
 
 const isRed = (piece: string) => piece !== "." && piece === piece.toUpperCase();
 
-export default function Board({ position, flipped, onMove }: BoardProps) {
+export default function Board({
+  position,
+  flipped,
+  onMove,
+  interactive = true,
+  highlight = null,
+  arrows = [],
+}: BoardProps) {
   const [selected, setSelected] = useState<number | null>(null);
   const { board, turn, legal_moves, last_move, in_check } = position;
 
-  // 起点 → 可走到的终点
+  // 起点 → 可走到的终点（不能走子时为空）
   const targets = useMemo(() => {
+    if (!interactive) return NO_TARGETS;
     const map = new Map<number, Set<number>>();
     for (const m of legal_moves) {
       const [from, to] = iccsToSquares(m);
@@ -44,14 +64,15 @@ export default function Board({ position, flipped, onMove }: BoardProps) {
       map.get(from)!.add(to);
     }
     return map;
-  }, [legal_moves]);
+  }, [legal_moves, interactive]);
 
-  // 局面变化后取消选择
+  // 局面变化或不能走子时取消选择
   const [lastFen, setLastFen] = useState(position.fen);
   if (lastFen !== position.fen) {
     setLastFen(position.fen);
     setSelected(null);
   }
+  if (!interactive && selected !== null) setSelected(null);
 
   const handleClick = (sq: number) => {
     if (selected !== null && targets.get(selected)?.has(sq)) {
@@ -83,6 +104,12 @@ export default function Board({ position, flipped, onMove }: BoardProps) {
         <filter id="piece-shadow" x="-30%" y="-30%" width="160%" height="160%">
           <feDropShadow dx="0" dy="2" stdDeviation="1.6" floodOpacity="0.35" />
         </filter>
+        {(["hint", "analysis"] as const).map((kind) => (
+          <marker key={kind} id={`arrow-${kind}`} className={`arrow-head ${kind}`} viewBox="0 0 10 10"
+            refX="5" refY="5" markerWidth="3.2" markerHeight="3.2" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" />
+          </marker>
+        ))}
       </defs>
 
       <rect className="board-bg" x={0} y={0} width={WIDTH} height={HEIGHT} rx={10} />
@@ -109,6 +136,24 @@ export default function Board({ position, flipped, onMove }: BoardProps) {
             <circle className="piece-ring" r={RADIUS - 5} />
             <text className="piece-text" dy="0.36em">{PIECE_CHARS[piece]}</text>
           </g>
+        );
+      })}
+
+      {highlight !== null && (() => {
+        const [x, y] = pointOf(highlight, flipped);
+        return <circle className="hint-ring" cx={x} cy={y} r={RADIUS + 6} />;
+      })()}
+
+      {arrows.map(({ move, kind }) => {
+        const [from, to] = iccsToSquares(move);
+        const [x1, y1] = pointOf(from, flipped);
+        const [x2, y2] = pointOf(to, flipped);
+        const len = Math.hypot(x2 - x1, y2 - y1);
+        const end = (len - RADIUS * 0.75) / len; // 箭头停在目标棋子边缘
+        return (
+          <line key={`arrow-${kind}-${move}`} className={`arrow ${kind}`}
+            x1={x1} y1={y1} x2={x1 + (x2 - x1) * end} y2={y1 + (y2 - y1) * end}
+            markerEnd={`url(#arrow-${kind})`} />
         );
       })}
 

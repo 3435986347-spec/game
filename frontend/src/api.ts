@@ -1,10 +1,12 @@
 // 与 Python 后端通信。所有规则判断都在后端，前端只负责显示和交互。
 
 export type Side = "red" | "black";
+export type Mode = "free" | "vs_ai";
 
 export interface MoveRecord {
   iccs: string;
   cn: string;
+  by_ai: boolean;
 }
 
 export interface ResultView {
@@ -28,8 +30,68 @@ export interface PositionView {
 export interface GameView {
   id: string;
   initial_fen: string;
+  mode: Mode;
+  /** 人机对战时你执哪一方；自由对弈为 null */
+  user_side: Side | null;
+  ai_level: number | null;
+  /** 人机对战中现在是否轮到 AI 走 */
+  ai_to_move: boolean;
+  hints_used: number;
   moves: MoveRecord[];
   position: PositionView;
+}
+
+export interface NewGameOptions {
+  fen?: string;
+  mode: Mode;
+  user_side: Side;
+  ai_level: number;
+}
+
+export interface HintView {
+  level: 2 | 3;
+  /** 该动的棋子所在格，如 "h0" */
+  from_square: string;
+  move: string | null;
+  cn: string | null;
+  pv_cn: string[] | null;
+  /** 走完推荐着法后红方的期望得分 0..1 */
+  red_win: number | null;
+  text: string;
+}
+
+export interface LevelInfo {
+  level: number;
+  name: string;
+}
+
+export interface EngineStatus {
+  configured: boolean;
+  ok: boolean;
+  name: string | null;
+  flavor: string | null;
+  error: string | null;
+  levels: LevelInfo[];
+}
+
+export interface AnalysisLine {
+  move: string;
+  cn: string;
+  pv_cn: string[];
+  /** 红方期望得分 0..1 */
+  red_win: number;
+  score_cp: number | null;
+  mate: number | null;
+  depth: number;
+}
+
+export interface AnalysisInfo {
+  type: "info";
+  game_id: string;
+  ply: number;
+  fen: string;
+  depth: number;
+  lines: AnalysisLine[];
 }
 
 export class ApiError extends Error {
@@ -60,10 +122,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  newGame: (fen?: string) =>
+  newGame: (options: NewGameOptions) =>
     request<GameView>("/api/games", {
       method: "POST",
-      body: JSON.stringify({ fen: fen || null }),
+      body: JSON.stringify({ ...options, fen: options.fen || null }),
     }),
   getGame: (id: string) => request<GameView>(`/api/games/${id}`),
   move: (id: string, move: string) =>
@@ -72,9 +134,20 @@ export const api = {
       body: JSON.stringify({ move }),
     }),
   undo: (id: string) => request<GameView>(`/api/games/${id}/undo`, { method: "POST" }),
+  aiMove: (id: string) => request<GameView>(`/api/games/${id}/ai-move`, { method: "POST" }),
+  hint: (id: string, level: 2 | 3) =>
+    request<HintView>(`/api/games/${id}/hint`, {
+      method: "POST",
+      body: JSON.stringify({ level }),
+    }),
+  engineStatus: () => request<EngineStatus>("/api/engine"),
 };
 
 const FILES = "abcdefghi";
+
+export function squareFromIccs(square: string): number {
+  return Number(square[1]) * 9 + FILES.indexOf(square[0]);
+}
 
 export function squareToIccs(sq: number): string {
   return FILES[sq % 9] + Math.floor(sq / 9);

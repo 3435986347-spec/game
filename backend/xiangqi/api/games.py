@@ -1,13 +1,16 @@
-"""对局：新建、走子、悔棋。当前阶段对局只保存在内存里，重启后清空。"""
+"""对局：新建、走子、悔棋、AI 走棋、提示。对局只保存在内存里，重启后清空。"""
 
 from __future__ import annotations
 
+import asyncio
+import random
 import uuid
 from dataclasses import dataclass, field
 
 from fastapi import APIRouter, HTTPException, Request
 
 from ..core import (
+    BLACK,
     RED,
     FenError,
     NotationError,
@@ -16,14 +19,34 @@ from ..core import (
     game_result,
     move_to_chinese,
     move_to_iccs,
+    parse_iccs,
     parse_move,
 )
 from ..core.fen import piece_to_letter
-from .schemas import GameView, MoveRecord, MoveRequest, NewGameRequest, PositionView, ResultView
+from ..core.notation import BLACK_NAME, RED_NAME
+from ..engine import (
+    AnalysisResult,
+    EngineError,
+    EngineService,
+    EngineUnavailable,
+    Limit,
+    choose_move,
+    get_level,
+)
+from .schemas import (
+    GameView,
+    HintRequest,
+    HintView,
+    MoveRecord,
+    MoveRequest,
+    NewGameRequest,
+    PositionView,
+    ResultView,
+)
 
 
-class GameOverError(Exception):
-    pass
+class GameError(Exception):
+    """对局状态不允许这个操作（如棋局已结束、不是你的回合），message 直接显示给用户。"""
 
 
 @dataclass
@@ -32,28 +55,66 @@ class Game:
     initial_fen: str
     position: Position
     rules: RuleConfig
+    mode: str = "free"  # free | vs_ai
+    ai_side: int | None = None  # 人机对战时 AI 执哪一方
+    ai_level: int | None = None
     records: list[MoveRecord] = field(default_factory=list)
+    hints_used: int = 0
+    rng: random.Random = field(default_factory=random.Random)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # 同一对局的操作依次执行
+    # 提示的分析结果，按「完整着法历史」缓存：同一局面、同一历史才复用
+    _hint_cache: tuple[tuple[str, ...], AnalysisResult] | None = None
 
     @classmethod
-    def create(cls, fen: str | None, rules: RuleConfig) -> Game:
-        position = Position.from_fen(fen) if fen else Position.start()
-        return cls(uuid.uuid4().hex[:12], position.fen(), position, rules)
+    def create(cls, body: NewGameRequest, rules: RuleConfig) -> Game:
+        position = Position.from_fen(body.fen) if body.fen else Position.start()
+        game = cls(uuid.uuid4().hex[:12], position.fen(), position, rules, mode=body.mode)
+        if body.mode == "vs_ai":
+            game.ai_side = BLACK if body.user_side == "red" else RED
+            game.ai_level = body.ai_level
+        return game
+
+    @property
+    def move_list(self) -> list[str]:
+        return [r.iccs for r in self.records]
 
     def result(self):
         return game_result(self.position, self.rules)
 
+    @property
+    def ai_to_move(self) -> bool:
+        return self.mode == "vs_ai" and self.position.turn == self.ai_side and self.result() is None
+
     def play(self, text: str) -> None:
+        """玩家走一步。"""
+        if self.ai_to_move:
+            raise GameError("现在轮到 AI 走棋")
+        self._apply(text, by_ai=False)
+
+    def play_ai(self, iccs: str) -> None:
+        self._apply(iccs, by_ai=True)
+
+    def _apply(self, text: str, *, by_ai: bool) -> None:
         if self.result() is not None:
-            raise GameOverError("棋局已经结束")
+            raise GameError("棋局已经结束")
         pos = self.position
         move = parse_move(pos.board, pos.turn, text)
-        record = MoveRecord(iccs=move_to_iccs(move), cn=move_to_chinese(pos.board, move))
+        record = MoveRecord(
+            iccs=move_to_iccs(move), cn=move_to_chinese(pos.board, move), by_ai=by_ai
+        )
         pos.push(move)
         self.records.append(record)
 
     def undo(self) -> None:
-        self.position.pop()
-        self.records.pop()
+        """悔棋。人机对战时撤回到轮到你走，并且至少撤掉你自己的一步。"""
+        count = 1
+        if self.mode == "vs_ai" and self.records and self.records[-1].by_ai:
+            count = 2
+        if count > len(self.records):
+            raise GameError("没有可以悔的棋")
+        for _ in range(count):
+            self.position.pop()
+            self.records.pop()
 
     def view(self) -> GameView:
         pos = self.position
@@ -65,6 +126,11 @@ class Game:
         return GameView(
             id=self.id,
             initial_fen=self.initial_fen,
+            mode=self.mode,  # type: ignore[arg-type]
+            user_side=None if self.ai_side is None else _side_name(-self.ai_side),
+            ai_level=self.ai_level,
+            ai_to_move=self.ai_to_move,
+            hints_used=self.hints_used,
             moves=self.records,
             position=PositionView(
                 fen=pos.fen(),
@@ -82,11 +148,44 @@ def _side_name(side: int) -> str:
     return "red" if side == RED else "black"
 
 
+def pv_to_chinese(pos: Position, pv: list[str], limit: int = 8) -> list[str]:
+    """把引擎主要变化（ICCS）转成中文记谱，遇到不合法的着法就停止。"""
+    p = pos.copy()
+    out: list[str] = []
+    for text in pv[:limit]:
+        try:
+            move = parse_iccs(text)
+        except NotationError:
+            break
+        if not p.is_legal(move):
+            break
+        out.append(move_to_chinese(p.board, move))
+        p.push(move)
+    return out
+
+
+def red_expected(score: float, turn: int) -> float:
+    """走棋方视角的期望得分 → 红方视角。"""
+    return score if turn == RED else 1.0 - score
+
+
+async def run_engine(coro_factory):
+    """调用引擎，把不可用 / 出错转换成 503，信息直接给用户看。"""
+    try:
+        return await coro_factory()
+    except (EngineUnavailable, EngineError) as e:
+        raise HTTPException(503, str(e)) from e
+
+
 router = APIRouter(prefix="/api/games", tags=["对局"])
 
 
 def _store(request: Request) -> dict[str, Game]:
     return request.app.state.games
+
+
+def _engines(request: Request) -> EngineService:
+    return request.app.state.engines
 
 
 def _get(request: Request, game_id: str) -> Game:
@@ -97,9 +196,9 @@ def _get(request: Request, game_id: str) -> Game:
 
 
 @router.post("", response_model=GameView)
-def new_game(body: NewGameRequest, request: Request) -> GameView:
+async def new_game(body: NewGameRequest, request: Request) -> GameView:
     try:
-        game = Game.create(body.fen, request.app.state.config.rules)
+        game = Game.create(body, request.app.state.config.rules)
     except FenError as e:
         raise HTTPException(400, f"FEN 无效：{e}") from e
     _store(request)[game.id] = game
@@ -107,24 +206,119 @@ def new_game(body: NewGameRequest, request: Request) -> GameView:
 
 
 @router.get("/{game_id}", response_model=GameView)
-def get_game(game_id: str, request: Request) -> GameView:
-    return _get(request, game_id).view()
+async def get_game(game_id: str, request: Request) -> GameView:
+    game = _get(request, game_id)
+    async with game.lock:  # 等正在进行的 AI 走棋完成，避免返回走到一半的状态
+        return game.view()
 
 
 @router.post("/{game_id}/moves", response_model=GameView)
-def play_move(game_id: str, body: MoveRequest, request: Request) -> GameView:
+async def play_move(game_id: str, body: MoveRequest, request: Request) -> GameView:
     game = _get(request, game_id)
-    try:
-        game.play(body.move)
-    except (NotationError, GameOverError) as e:
-        raise HTTPException(400, str(e)) from e
-    return game.view()
+    async with game.lock:
+        try:
+            game.play(body.move)
+        except (NotationError, GameError) as e:
+            raise HTTPException(400, str(e)) from e
+        return game.view()
 
 
 @router.post("/{game_id}/undo", response_model=GameView)
-def undo_move(game_id: str, request: Request) -> GameView:
+async def undo_move(game_id: str, request: Request) -> GameView:
     game = _get(request, game_id)
-    if not game.records:
-        raise HTTPException(400, "已经是初始局面，没有可以悔的棋")
-    game.undo()
-    return game.view()
+    async with game.lock:
+        try:
+            game.undo()
+        except GameError as e:
+            raise HTTPException(400, str(e)) from e
+        return game.view()
+
+
+@router.post("/{game_id}/ai-move", response_model=GameView)
+async def ai_move(game_id: str, request: Request) -> GameView:
+    """人机对战中让 AI 走一步（按对局的难度级别）。"""
+    game = _get(request, game_id)
+    async with game.lock:
+        if not game.ai_to_move:
+            raise HTTPException(400, "现在不是 AI 走棋")
+        level = get_level(game.ai_level or 1)
+        engine = await run_engine(_engines(request).player)
+        result = await run_engine(
+            lambda: engine.analyse(
+                game.initial_fen, game.move_list, limit=level.limit(), multipv=level.multipv
+            )
+        )
+        move = choose_move(result, level, game.rng)
+        if move is None:
+            raise HTTPException(500, "引擎没有给出着法")
+        try:
+            game.play_ai(move)
+        except NotationError as e:
+            raise HTTPException(
+                503, f"引擎给出了不合法的着法 {move}，请检查 config.toml 中 [engine] 的 flavor"
+            ) from e
+        return game.view()
+
+
+@router.post("/{game_id}/hint", response_model=HintView)
+async def hint(game_id: str, body: HintRequest, request: Request) -> HintView:
+    """2 级提示：该动哪个子；3 级提示：具体着法、主要变化和走完后的胜率。"""
+    game = _get(request, game_id)
+    async with game.lock:
+        if game.result() is not None:
+            raise HTTPException(400, "棋局已经结束")
+        if game.ai_to_move:
+            raise HTTPException(400, "现在轮到 AI 走棋")
+        pos = game.position
+        history = tuple(game.move_list)
+        if game._hint_cache is not None and game._hint_cache[0] == history:
+            analysis = game._hint_cache[1]
+        else:
+            engines = _engines(request)
+            engine = await run_engine(engines.player)
+            movetime = engines.config.hint_movetime_ms if engines.config else 1000
+            analysis = await run_engine(
+                lambda: engine.analyse(
+                    game.initial_fen, game.move_list, limit=Limit(movetime_ms=movetime), multipv=1
+                )
+            )
+        if not analysis.lines or not _is_legal_text(pos, analysis.lines[0].move):
+            game._hint_cache = None
+            raise HTTPException(
+                503, "引擎没有给出合法的着法，请检查 config.toml 中 [engine] 的 flavor"
+            )
+        game._hint_cache = (history, analysis)
+        best = analysis.lines[0]
+        game.hints_used += 1
+        return _hint_view(pos, best, body.level)
+
+
+def _is_legal_text(pos: Position, text: str) -> bool:
+    try:
+        return pos.is_legal(parse_iccs(text))
+    except NotationError:
+        return False
+
+
+def _hint_view(pos: Position, best, level: int) -> HintView:
+    from_square = best.move[:2]
+    piece = pos.board[parse_iccs(best.move)[0]]
+    name = (RED_NAME if piece > 0 else BLACK_NAME)[abs(piece)]
+    if level == 2:
+        return HintView(level=2, from_square=from_square, text=f"提示：想想这个{name}可以怎么走。")
+    pv_cn = pv_to_chinese(pos, best.pv) or [move_to_chinese(pos.board, parse_iccs(best.move))]
+    red_win = red_expected(best.expected_score(), pos.turn)
+    side_win = red_win if pos.turn == RED else 1 - red_win
+    text = f"引擎推荐：{pv_cn[0]}。"
+    if len(pv_cn) > 1:
+        text += f"后续可能：{' '.join(pv_cn[:5])}。"
+    text += f"走完后{'红' if pos.turn == RED else '黑'}方期望得分约 {side_win:.0%}。"
+    return HintView(
+        level=3,
+        from_square=from_square,
+        move=best.move,
+        cn=pv_cn[0],
+        pv_cn=pv_cn,
+        red_win=round(red_win, 4),
+        text=text,
+    )

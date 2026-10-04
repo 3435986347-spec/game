@@ -1,4 +1,6 @@
-"""FastAPI 应用：/api 下是接口，其余路径提供前端页面。"""
+"""FastAPI 应用：/api 下是接口，/ws 下是 WebSocket，其余路径提供前端页面。"""
+
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
@@ -6,7 +8,8 @@ from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
 from ..config import AppConfig
-from . import games
+from ..engine import EngineService
+from . import analysis, games
 
 _NOT_BUILT_HTML = """<!doctype html><meta charset="utf-8"><title>象棋自学</title>
 <p>后端已启动，但前端还没有构建。请运行：</p>
@@ -19,10 +22,21 @@ npm run build</pre>
 
 def create_app(config: AppConfig | None = None) -> FastAPI:
     config = config or AppConfig()
-    app = FastAPI(title="象棋自学", version=__version__)
+    engines = EngineService(config.engine)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        yield
+        await engines.close()  # 退出时关闭引擎进程
+
+    app = FastAPI(title="象棋自学", version=__version__, lifespan=lifespan)
     app.state.config = config
     app.state.games = {}
+    app.state.engines = engines
+    app.state.analysis_task = None  # 当前正在进行的实时分析（全局只有一个）
+    app.state.analysis_socket = None
     app.include_router(games.router)
+    app.include_router(analysis.router)
 
     @app.get("/api/health", tags=["系统"])
     def health() -> dict[str, str]:

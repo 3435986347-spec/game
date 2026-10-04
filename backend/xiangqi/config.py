@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .core import RuleConfig
+from .engine import EngineConfig
 
 # backend/xiangqi/config.py → 仓库根目录
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -23,6 +24,7 @@ class AppConfig:
     port: int = 8000
     static_dir: Path | None = REPO_ROOT / "frontend" / "dist"  # 前端构建产物
     rules: RuleConfig = field(default_factory=RuleConfig)
+    engine: EngineConfig | None = None  # 未配置时人机对战、提示、分析不可用
 
 
 def find_config_file(explicit: str | Path | None = None) -> Path | None:
@@ -45,6 +47,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     base = file.resolve().parent
     server = data.get("server", {})
     rules = data.get("rules", {})
+    engine = data.get("engine", {})
     static_dir = server.get("static_dir")
     defaults = AppConfig()
     return AppConfig(
@@ -55,4 +58,20 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             move_limit=int(rules.get("move_limit", defaults.rules.move_limit)),
             repetition_count=int(rules.get("repetition_count", defaults.rules.repetition_count)),
         ),
+        engine=_engine_config(engine, base),
+    )
+
+
+def _engine_config(section: dict, base: Path) -> EngineConfig | None:
+    if not section.get("path"):
+        return None
+    eval_file = section.get("eval_file")
+    return EngineConfig(
+        path=base / section["path"],
+        args=tuple(str(a) for a in section.get("args", ())),
+        flavor=section.get("flavor", "pikafish"),
+        eval_file=(base / eval_file) if eval_file else None,
+        threads=int(section.get("threads", 2)),
+        hash_mb=int(section.get("hash_mb", 128)),
+        hint_movetime_ms=int(section.get("hint_movetime_ms", 1000)),
     )

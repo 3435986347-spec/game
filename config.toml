@@ -9,11 +9,16 @@ static_dir = "frontend/dist"   # 前端构建产物目录（cd frontend && npm r
 move_limit = 60          # 自然限着：连续多少回合无吃子判和，0 表示不限
 repetition_count = 3     # 同一局面出现几次进入重复判定（长将判负，其余判和）
 
-# 以下配置在后续阶段启用：
+# 象棋引擎：安装方法见 README「安装象棋引擎」。可以用 cd backend && uv run xiangqi-engine-check ../engines/Pikafish
+# 自动挑选能在本机运行的最快版本，并打印要填写的内容。去掉下面几行开头的 # 即可启用。
 # [engine]
-# path = "engines/pikafish"
-# threads = 4
-# hash_mb = 256
-#
+# path = "engines/Pikafish/MacOS/pikafish-apple-silicon"   # 引擎可执行文件（Windows 为 .exe）
+# flavor = "pikafish"          # pikafish | fairy-stockfish
+# eval_file = ""               # pikafish.nnue 的路径；留空则在引擎所在目录及上两级目录中查找
+# threads = 2                  # 每个引擎实例的线程数（对局和分析各一个实例）
+# hash_mb = 128
+# hint_movetime_ms = 1000      # 提示时引擎思考多久（毫秒）
+
+# 以下配置在后续阶段启用：
 # [llm]
 # provider = "none"      # "openai_compat" | "claude" | "none"
