@@ -223,6 +223,7 @@ class MoveAnalysisView(ReviewMove):
 
     red_win: float = Field(description="走完这步之后红方的期望得分")
     terminal: str | None = Field(default=None, description="走完这步棋局结束时的说明")
+    fen_before: str = Field(description="走这步之前的局面（加入错题本用）")
 
 
 class SideStats(BaseModel):
@@ -270,3 +271,228 @@ class ExplainRequest(BaseModel):
 
 class GameReviewStarted(BaseModel):
     library_id: int
+
+
+# ---- 名局解读 ----
+
+
+class GameSummaryView(BaseModel):
+    opening: str
+    middlegame: str
+    endgame: str
+    overall: str
+    source: Literal["llm", "template"]
+    provider: str | None = None
+    model: str | None = None
+    note: str | None = None
+
+
+class AnnotatedMove(BaseModel):
+    ply: int
+    side: Side
+    cn: str
+    grade: Grade
+    phase: str
+    red_before: float = Field(description="走这步之前红方的期望得分")
+    red_after: float
+    intent: ExplanationView = Field(description="这步棋的意图（headline 为一句话结论）")
+
+
+class AnnotateView(BaseModel):
+    game_id: int
+    status: Literal["none", "running", "done", "error"]
+    progress: int = 0
+    total: int = 0
+    error: str | None = None
+    summary: GameSummaryView | None = None
+    moves: list[AnnotatedMove] = Field(default_factory=list, description="解读过的关键着法")
+
+
+# ---- 猜着练习 ----
+
+
+class StartGuessRequest(BaseModel):
+    game_id: int = Field(description="棋谱库中的对局")
+    side: Side = Field(description="你执哪一方（猜这一方的着法）")
+    skip_plies: int = Field(default=0, ge=0, description="开头跳过多少步（半回合）不猜")
+
+
+class MoveAnswerRequest(BaseModel):
+    move: str | None = Field(
+        default=None, description="你的着法（ICCS 或中文记谱）；null 表示不会，直接看答案"
+    )
+
+
+class GuessAnswerView(BaseModel):
+    ply: int = Field(description="这步棋是第几步（从 1 开始）")
+    fen_before: str
+    user_move: str | None
+    user_cn: str | None
+    master_move: str
+    master_cn: str
+    points: int = Field(description="0–3 分")
+    loss: float | None = Field(description="比大师着法差多少期望得分（不差为 0；放弃时为 null）")
+    same: bool = Field(description="和大师着法相同")
+    as_good: bool = Field(description="和大师不同，但引擎认为不差")
+    master_not_best: bool = Field(description="此处大师着法也非最佳")
+    best_move: str | None
+    best_cn: str | None
+    user_score: float | None = Field(description="你的着法走完后，你这一方的期望得分")
+    master_score: float | None
+    explanation: ExplanationView | None
+
+
+class GuessSummary(BaseModel):
+    answered: int
+    matched: int = Field(description="和大师着法相同的步数")
+    match_rate: float | None
+    avg_loss: float | None = Field(description="平均每步比大师着法差多少期望得分")
+    worst: list[int] = Field(description="失分最多的几步（步数）")
+    cards_added: int = Field(description="加入错题本的步数")
+
+
+class GuessView(BaseModel):
+    id: int
+    game_id: int
+    red: str | None
+    black: str | None
+    event: str | None
+    side: Side
+    start_ply: int
+    current_ply: int = Field(description="当前局面走了多少步；没结束时轮到你猜下一步")
+    total_plies: int
+    score: int
+    max_score: int
+    finished: bool
+    initial_fen: str
+    fen: str = Field(description="当前局面")
+    last_move: str | None
+    in_check: bool
+    legal_moves: list[str] = Field(description="当前局面的合法着法（ICCS）；猜完后为空")
+    moves: list[MoveRecord] = Field(description="到当前局面为止的着法")
+    answers: list[GuessAnswerView]
+    summary: GuessSummary | None = Field(description="猜完之后的总结")
+
+
+class GuessAnswerResult(BaseModel):
+    answer: GuessAnswerView
+    session: GuessView
+
+
+class GuessSessionItem(BaseModel):
+    id: int
+    game_id: int
+    red: str | None
+    black: str | None
+    event: str | None
+    side: Side
+    score: int
+    max_score: int
+    finished: bool
+    current_ply: int
+    total_plies: int | None
+    created_at: str
+
+
+# ---- 训练：错题本、做题 ----
+
+
+class TrainSummary(BaseModel):
+    due: int = Field(description="今天要复习的题数（错题 + 做错的题）")
+    due_mistakes: int
+    due_puzzles: int
+    cards: int = Field(description="错题本里一共多少题")
+    puzzles: int = Field(description="题库里一共多少题")
+    puzzles_attempted: int
+    puzzles_solved: int
+    rating: float = Field(description="做题等级分")
+    themes: list[TagCount] = Field(description="题库里各主题的题数")
+
+
+class CardView(BaseModel):
+    id: int
+    kind: Literal["mistake", "puzzle"]
+    fen: str
+    turn: Side
+    legal_moves: list[str]
+    in_check: bool
+    played: str | None = Field(description="当时走的错着（ICCS）")
+    played_cn: str | None
+    source: str | None
+    source_game_id: int | None
+    source_ply: int | None
+    reps: int
+    lapses: int
+    interval_days: float
+    due_at: str
+    created_at: str
+
+
+class CardItem(CardView):
+    solution: str
+    solution_cn: str
+
+
+class NextCard(BaseModel):
+    card: CardView | None
+    due: int
+
+
+class TrainResult(BaseModel):
+    """复习一题或做一道题的结果。"""
+
+    correct: bool
+    move: str | None
+    move_cn: str | None
+    solution: str
+    solution_cn: str
+    pv_cn: list[str] = Field(description="正解之后的变化")
+    explanation: ExplanationView | None = None
+
+
+class CardResult(TrainResult):
+    interval_days: float = Field(description="下次复习间隔（天）；0 表示 10 分钟后再出")
+    due_at: str
+    due: int = Field(description="剩下要复习的题数")
+
+
+class AddCardRequest(BaseModel):
+    fen: str
+    solution: str = Field(description="正确着法（ICCS）")
+    played: str | None = Field(default=None, description="走错的着法（ICCS）")
+    source: str | None = None
+    source_game_id: int | None = None
+    source_ply: int | None = None
+    explanation: ExplanationView | None = None
+
+
+class AddCardResult(BaseModel):
+    card_id: int | None
+    created: bool = Field(description="false 表示这一题已经在错题本里")
+
+
+class PuzzleView(BaseModel):
+    id: int
+    fen: str
+    turn: Side
+    legal_moves: list[str]
+    in_check: bool
+    rating: int
+    attempts: int
+    theme: str | None = Field(description="按主题出题时的主题（其余标签做完才显示）")
+
+
+class NextPuzzle(BaseModel):
+    puzzle: PuzzleView | None
+    rating: float
+
+
+class PuzzleResult(TrainResult):
+    tags: list[str]
+    puzzle_rating: int
+    rating_before: float
+    rating_after: float
+    card_added: bool = Field(description="做错了，加入错题本")
+    master_found: bool | None = Field(description="棋谱里实际走出了正解")
+    source_game_id: int | None
+    source_ply: int | None

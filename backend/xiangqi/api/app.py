@@ -11,7 +11,8 @@ from ..config import AppConfig
 from ..engine import EngineService
 from ..library import Library
 from ..llm import ExplainService
-from . import analysis, coach, games, review
+from ..training import TrainingStore
+from . import analysis, annotate, coach, games, guess, review, train
 from . import library as library_api
 
 _NOT_BUILT_HTML = """<!doctype html><meta charset="utf-8"><title>象棋自学</title>
@@ -35,6 +36,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             app.state.import_jobs
         )  # 中止进行中的导入，否则要等它导完才能退出
         await review.stop_reviews(app.state.review_jobs)
+        await review.stop_reviews(app.state.annotate_jobs)
         await engines.close()  # 退出时关闭引擎进程
         library.close()
 
@@ -47,12 +49,18 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.library = library
     app.state.import_jobs = {}
     app.state.review_jobs = {}
+    app.state.annotate_jobs = {}
     app.state.explainer = ExplainService(config.llm, cache=library)
+    app.state.training = TrainingStore(library)
+    app.state.guess_locks = {}  # 猜着练习：同一次练习的作答依次处理
     app.include_router(games.router)
     app.include_router(analysis.router)
     app.include_router(library_api.router)
     app.include_router(review.router)
+    app.include_router(annotate.router)
     app.include_router(coach.router)
+    app.include_router(guess.router)
+    app.include_router(train.router)
 
     @app.get("/api/health", tags=["系统"])
     def health() -> dict[str, str]:

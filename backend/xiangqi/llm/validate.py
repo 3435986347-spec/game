@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 
-from .base import Explanation
+from pydantic import BaseModel
 
 _PIECES = "车車俥马馬傌炮砲包相象仕士帅帥将將兵卒"
 _NUM = "一二三四五六七八九1-9１-９"
@@ -42,24 +42,35 @@ def find_moves(text: str) -> list[str]:
     return CN_MOVE.findall(text)
 
 
-def unknown_moves(explanation: Explanation, allowed_keys: set[str]) -> list[str]:
+def _texts(value) -> list[str]:
+    """输出里的全部文字（字符串字段和字符串列表）。"""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [t for v in value.values() for t in _texts(v)]
+    if isinstance(value, list):
+        return [t for v in value for t in _texts(v)]
+    return []
+
+
+def unknown_moves(output: BaseModel, allowed_keys: set[str]) -> list[str]:
     """讲解中出现、但不在白名单里的着法（去重，保持出现顺序）。"""
-    texts = [explanation.headline, explanation.why, explanation.better, explanation.principle]
-    texts += explanation.tags
     out: list[str] = []
-    for text in texts:
+    for text in _texts(output.model_dump()):
         for found in find_moves(text):
             if move_key(found) not in allowed_keys and found not in out:
                 out.append(found)
     return out
 
 
-def problems(explanation: Explanation, allowed_keys: set[str]) -> list[str]:
+def problems(output: BaseModel, allowed_keys: set[str]) -> list[str]:
     """讲解不合格的原因；合格时返回空列表。"""
     issues = []
-    if not explanation.headline.strip():
-        issues.append("headline 是空的")
-    unknown = unknown_moves(explanation, allowed_keys)
+    data = output.model_dump()
+    first = next(iter(data.values()), "")
+    if isinstance(first, str) and not first.strip():
+        issues.append(f"{next(iter(data))} 是空的")
+    unknown = unknown_moves(output, allowed_keys)
     if unknown:
         issues.append(
             f"提到了 allowed_moves_cn 之外的着法：{'、'.join(unknown)}。"

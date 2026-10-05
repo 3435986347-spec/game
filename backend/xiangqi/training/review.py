@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -19,7 +20,7 @@ from dataclasses import dataclass
 from ..core import RED, Position, RuleConfig, game_result, parse_iccs
 from ..core.features import game_phase
 from ..engine import AnalysisResult, Limit, UciEngine
-from ..llm import EngineLine
+from ..llm import EngineLine, ExplainContext, build_context
 
 GRADES = ("妙着", "好棋", "可以", "缓着", "失误", "漏着")
 BAD_GRADES = ("缓着", "失误", "漏着")
@@ -275,3 +276,90 @@ def summarize(grades: list[MoveGrade], focus: list[int]) -> dict:
         "stats": stats,
         "key_moments": key_moments,
     }
+
+
+def focus_sides(record: dict) -> list[int]:
+    """关注的一方：自己的对局（标签里写着「我」的一方）只看自己，其余看双方。"""
+    red_me, black_me = record.get("red") == "我", record.get("black") == "我"
+    if record.get("kind") == "my_game" and red_me != black_me:
+        return [RED] if red_me else [-RED]
+    return [RED, -RED]
+
+
+def move_context(
+    record: dict,
+    ply: int,
+    before: list[EngineLine],
+    after: list[EngineLine],
+    *,
+    grade: str | None,
+    win_before: float | None,
+    win_after: float | None,
+    level: str,
+    extra_facts: list[str] | None = None,
+    extra_allowed: list[tuple[list[int], tuple[int, int]]] | None = None,
+) -> ExplainContext:
+    """record（initial_fen、moves）中第 ply 步（从 1 开始）的讲解上下文。"""
+    pos = position_after(record["initial_fen"], record["moves"], ply - 1)
+    return build_context(
+        pos,
+        parse_iccs(record["moves"][ply - 1]),
+        before=before,
+        after=after,
+        win_before=win_before,
+        win_after=win_after,
+        grade=grade,
+        level=level,
+        extra_facts=extra_facts,
+        extra_allowed=extra_allowed,
+    )
+
+
+def position_after(initial_fen: str, moves: list[str], ply: int) -> Position:
+    """走了前 ply 步之后的局面。"""
+    pos = Position.from_fen(initial_fen, validate=False)
+    for text in moves[:ply]:
+        pos.push(parse_iccs(text))
+    return pos
+
+
+async def review_game(
+    engine: UciEngine,
+    record: dict,
+    *,
+    limit: Limit,
+    rules: RuleConfig,
+    progress: Callable[[int, int], None] | None = None,
+) -> tuple[list[PositionEval], list[MoveGrade], dict]:
+    """整盘分析 + 每步评级 + 汇总（不含讲解）。"""
+    fen, moves = record["initial_fen"], record["moves"]
+    evals = await analyse_positions(engine, fen, moves, limit=limit, rules=rules, progress=progress)
+    grades = grade_moves(fen, moves, evals)
+    return evals, grades, summarize(grades, focus_sides(record))
+
+
+def review_rows(
+    evals: list[PositionEval], grades: list[MoveGrade], explanations: dict[int, dict]
+) -> list[dict]:
+    """move_analysis 表的各行：每个局面的评估，加上走到这个局面的那步棋的评级和讲解。"""
+    rows = [
+        {
+            "ply": ev.ply,
+            "red_win": ev.red_win,
+            "lines": json.dumps([line.to_dict() for line in ev.lines]),
+            "terminal": ev.terminal,
+        }
+        for ev in evals
+    ]
+    for g in grades:
+        rows[g.ply].update(
+            move=g.move,
+            grade=g.grade,
+            win_before=g.win_before,
+            win_after=g.win_after,
+            is_best=int(g.is_best),
+            phase=g.phase,
+        )
+        if g.ply in explanations:
+            rows[g.ply]["explanation"] = json.dumps(explanations[g.ply], ensure_ascii=False)
+    return rows

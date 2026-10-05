@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { percent } from "./AnalysisPanel";
 import { api } from "./api";
-import type { Grade, LLMStatus, ReviewMove, ReviewReport, Side, SideStats } from "./api";
+import type { Explanation, Grade, LLMStatus, ReviewMove, ReviewReport, Side, SideStats } from "./api";
 import ExplanationBlock from "./ExplanationBlock";
 import { GRADE_STYLE } from "./useReview";
 import type { ReviewState } from "./useReview";
@@ -197,11 +197,28 @@ interface MoveReviewProps {
   /** 能否重新生成讲解 */
   canRefresh?: boolean;
   title?: string;
+  /** 名局解读里这步棋的意图 */
+  intent?: Explanation | null;
+  /** 加入错题本（这步不是引擎最佳时显示按钮）；返回 false 表示本来就在错题本里 */
+  onAddCard?: () => Promise<boolean>;
 }
 
 /** 一步棋的评级、引擎推荐和讲解（没有讲解时可以按需生成）。打谱和边下边分析共用。 */
-export function MoveReview({ llm, move: m, loading, busy, onExplain, canRefresh = true, title }: MoveReviewProps) {
+export function MoveReview({
+  llm, move: m, loading, busy, onExplain, canRefresh = true, title, intent, onAddCard,
+}: MoveReviewProps) {
   const canUpgrade = canRefresh && m.explanation?.source === "template" && !!llm?.ready;
+  const [cardState, setCardState] = useState<"idle" | "saving" | "added" | "exists" | "error">("idle");
+  const addCard = async () => {
+    if (!onAddCard) return;
+    setCardState("saving");
+    try {
+      setCardState((await onAddCard()) ? "added" : "exists");
+    } catch {
+      setCardState("error");
+    }
+  };
+  const notBest = !!m.best_move && m.best_move !== m.iccs;
   return (
     <div className="card move-review">
       {title && <p className="muted small move-review-title">{title}</p>}
@@ -235,6 +252,22 @@ export function MoveReview({ llm, move: m, loading, busy, onExplain, canRefresh 
         <button onClick={() => onExplain(false)} disabled={busy}>
           {loading ? "讲解中……" : "讲解这步"}
         </button>
+      )}
+      {intent && (
+        <div className="move-intent">
+          <p className="muted small">名局解读：这步想干什么</p>
+          <ExplanationBlock explanation={intent} />
+        </div>
+      )}
+      {onAddCard && notBest && (
+        <p className="small move-card">
+          {cardState === "added" ? "已加入错题本。" : cardState === "exists" ? "这一题已经在错题本里了。" : (
+            <button className="link" onClick={() => void addCard()} disabled={cardState === "saving"}
+              title="以后在训练页复习：从这个局面找出引擎推荐的着法">
+              {cardState === "error" ? "加入失败，再试一次" : "加入错题本"}
+            </button>
+          )}
+        </p>
       )}
     </div>
   );

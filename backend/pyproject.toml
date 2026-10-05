@@ -16,6 +16,7 @@ xiangqi = "xiangqi.__main__:main"
 xiangqi-engine-check = "xiangqi.engine.check:main"
 xiangqi-import = "xiangqi.library.cli:main"
 xiangqi-llm-eval = "xiangqi.llm.evaluate:main"
+xiangqi-puzzles = "xiangqi.training.cli:main"
 
 [dependency-groups]
 dev = [

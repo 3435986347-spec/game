@@ -21,12 +21,12 @@ from dataclasses import dataclass
 
 from fastapi import APIRouter, HTTPException, Request
 
-from ..core import BLACK, RED, Position, move_to_chinese, parse_iccs
+from ..core import RED, Position, move_to_chinese, parse_iccs
 from ..core.variation import pv_to_chinese
 from ..engine import EngineError, EngineUnavailable, Limit
 from ..library import Library, moves_hash
-from ..llm import EngineLine, ExplainContext, ExplainService, build_context
-from ..training import MoveGrade, analyse_positions, grade_moves, summarize
+from ..llm import EngineLine, ExplainService
+from ..training import collect_from_review, move_context, review_game, review_rows
 from ..training.review import PHASES
 from .games import _get as get_live_game
 from .games import save_to_library
@@ -79,41 +79,6 @@ def _jobs(request: Request) -> dict[int, ReviewJob]:
     return request.app.state.review_jobs
 
 
-def _focus(record: dict) -> list[int]:
-    """关注的一方：自己的对局（标签里写着「我」的一方）只看自己，其余看双方。"""
-    red_me, black_me = record.get("red") == "我", record.get("black") == "我"
-    if record.get("kind") == "my_game" and red_me != black_me:
-        return [RED] if red_me else [BLACK]
-    return [RED, BLACK]
-
-
-def move_context(
-    record: dict,
-    ply: int,
-    before: list[EngineLine],
-    after: list[EngineLine],
-    *,
-    grade: str | None,
-    win_before: float | None,
-    win_after: float | None,
-    level: str,
-) -> ExplainContext:
-    """第 ply 步（从 1 开始）的讲解上下文。"""
-    pos = Position.from_fen(record["initial_fen"], validate=False)
-    for text in record["moves"][: ply - 1]:
-        pos.push(parse_iccs(text))
-    return build_context(
-        pos,
-        parse_iccs(record["moves"][ply - 1]),
-        before=before,
-        after=after,
-        win_before=win_before,
-        win_after=win_after,
-        grade=grade,
-        level=level,
-    )
-
-
 # ---------------------------------------------------------------------------
 # 后台复盘
 # ---------------------------------------------------------------------------
@@ -130,16 +95,13 @@ async def _run_review(app, job: ReviewJob, record: dict) -> None:
 
     try:
         engine = await app.state.engines.reviewer()
-        evals = await analyse_positions(
+        evals, grades, summary = await review_game(
             engine,
-            fen,
-            moves,
+            record,
             limit=Limit(movetime_ms=config.review_movetime_ms),
             rules=config.rules,
             progress=on_progress,
         )
-        grades = grade_moves(fen, moves, evals)
-        summary = summarize(grades, _focus(record))
 
         job.phase, job.progress, job.total = "explaining", 0, len(summary["key_moments"])
         explanations: dict[int, dict] = {}
@@ -160,11 +122,6 @@ async def _run_review(app, job: ReviewJob, record: dict) -> None:
         tags = Counter(t for e in explanations.values() for t in e["tags"] if t not in PHASES)
         summary["tags"] = [{"tag": t, "count": n} for t, n in tags.most_common()]
 
-        rows = [_row(ev.ply, ev.red_win, ev.lines, ev.terminal) for ev in evals]
-        for g in grades:
-            rows[g.ply].update(_grade_columns(g))
-            if g.ply in explanations:
-                rows[g.ply]["explanation"] = json.dumps(explanations[g.ply], ensure_ascii=False)
         await asyncio.to_thread(
             library.save_review,
             job.game_id,
@@ -172,8 +129,21 @@ async def _run_review(app, job: ReviewJob, record: dict) -> None:
             engine=engine.name,
             movetime_ms=config.review_movetime_ms,
             summary=summary,
-            rows=rows,
+            rows=review_rows(evals, grades, explanations),
         )
+        # 自动出题；自己的对局里的失误加入错题本。复盘结果已经存好，这一步出错只记日志
+        try:
+            await asyncio.to_thread(
+                collect_from_review,
+                app.state.training,
+                record,
+                job.game_id,
+                evals,
+                grades,
+                explanations,
+            )
+        except Exception:
+            logger.exception("复盘后自动出题失败")
     except (EngineUnavailable, EngineError, TimeoutError) as e:
         job.error = f"复盘失败：{e or '引擎响应超时'}"
     except sqlite3.Error as e:
@@ -187,26 +157,6 @@ async def _run_review(app, job: ReviewJob, record: dict) -> None:
         job.done = True
         if job.error is None:
             app.state.review_jobs.pop(job.game_id, None)  # 结果已存库
-
-
-def _row(ply: int, red_win: float, lines: list[EngineLine], terminal: str | None) -> dict:
-    return {
-        "ply": ply,
-        "red_win": red_win,
-        "lines": json.dumps([line.to_dict() for line in lines]),
-        "terminal": terminal,
-    }
-
-
-def _grade_columns(g: MoveGrade) -> dict:
-    return {
-        "move": g.move,
-        "grade": g.grade,
-        "win_before": g.win_before,
-        "win_after": g.win_after,
-        "is_best": int(g.is_best),
-        "phase": g.phase,
-    }
 
 
 async def start_review(request: Request, game_id: int, *, force: bool = False) -> ReviewView:

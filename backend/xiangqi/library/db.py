@@ -8,6 +8,7 @@
 - reviews / move_analysis：整盘复盘的结果（每局一份）。move_analysis 每个局面一行：
   引擎评估、走到这个局面的那步棋的评级，以及讲解。对局删除时一并删除；
   对局着法改过之后（reviews.moves_hash 对不上）读取时作废。
+- annotations：名局解读（关键着法的意图、分阶段总结），依赖复盘结果，复盘重做或作废时一并删除。
 - explain_cache：大模型讲解的缓存（局面 + 着法 + 评级 + 水平 + 模型），同样的错误不重复花钱。
 每个线程用自己的连接（导入在后台线程进行），数据库为 WAL 模式，导入时也可以正常查询。
 导入时最多约 1 秒提交一次，写锁不会长时间占着，导入期间保存对局只需稍等。
@@ -32,7 +33,7 @@ from .importer import GameFormatError, ParsedGame, resolve_game
 from .openings import classify
 from .parse import RawGame
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS games (
     id INTEGER PRIMARY KEY AUTOINCREMENT,  -- id 不复用：删掉的对局，旧链接不会指到别的对局
@@ -81,6 +82,13 @@ CREATE TABLE IF NOT EXISTS move_analysis (
     phase TEXT,
     explanation TEXT,  -- JSON：讲解（关键时刻自动生成，其余按需生成）
     PRIMARY KEY (game_id, ply)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS annotations (
+    game_id INTEGER NOT NULL,
+    ply INTEGER NOT NULL,  -- 着法序号（从 1 开始）；整盘总结为 0
+    kind TEXT NOT NULL,  -- intent（这步棋的意图）| summary（分阶段总结）
+    content TEXT NOT NULL,  -- JSON
+    PRIMARY KEY (game_id, ply, kind)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS explain_cache (
     cache_key TEXT PRIMARY KEY,
@@ -394,11 +402,13 @@ class Library:
     # ---- 复盘 ----
 
     def game_moves(self, game_id: int) -> dict | None:
-        """复盘需要的对局信息：起始局面、着法、对局双方、类型。"""
+        """复盘、猜着、解读需要的对局信息：起始局面、着法、双方、赛事、结果、开局、类型。"""
         row = (
             self.connect()
             .execute(
-                "SELECT initial_fen, moves, red, black, kind FROM games WHERE id = ?", (game_id,)
+                """SELECT initial_fen, moves, red, black, event, result, opening, kind
+                   FROM games WHERE id = ?""",
+                (game_id,),
             )
             .fetchone()
         )
@@ -488,6 +498,45 @@ class Library:
     def _delete_review(conn: sqlite3.Connection, game_id: int) -> None:
         conn.execute("DELETE FROM reviews WHERE game_id = ?", (game_id,))
         conn.execute("DELETE FROM move_analysis WHERE game_id = ?", (game_id,))
+        conn.execute("DELETE FROM annotations WHERE game_id = ?", (game_id,))
+
+    # ---- 名局解读 ----
+
+    def save_annotations(
+        self, game_id: int, items: list[tuple[int, str, dict]], *, reviewed_at: str
+    ) -> bool:
+        """保存（覆盖）一盘棋的解读：[(着法序号, kind, 内容)]。reviewed_at 为解读所依据的复盘的
+        created_at：解读期间复盘被删掉或重做了（解读已经过时）就不保存，返回 False。"""
+        review = "SELECT 1 FROM reviews WHERE game_id = ? AND created_at = ?"
+        conn = self.connect()
+        try:
+            # 第一条写语句：拿到写锁，下面的检查不会被打断；过时的解读不删新复盘上的解读
+            conn.execute(
+                f"DELETE FROM annotations WHERE game_id = ? AND EXISTS ({review})",
+                (game_id, game_id, reviewed_at),
+            )
+            current = conn.execute(review, (game_id, reviewed_at)).fetchone() is not None
+            if current:
+                conn.executemany(
+                    "INSERT INTO annotations (game_id, ply, kind, content) VALUES (?, ?, ?, ?)",
+                    [
+                        (game_id, ply, kind, json.dumps(content, ensure_ascii=False))
+                        for ply, kind, content in items
+                    ],
+                )
+            conn.commit()
+            return current
+        except BaseException:
+            conn.rollback()
+            raise
+
+    def get_annotations(self, game_id: int) -> list[dict]:
+        rows = self.connect().execute(
+            "SELECT ply, kind, content FROM annotations WHERE game_id = ? ORDER BY ply", (game_id,)
+        )
+        return [
+            {"ply": r["ply"], "kind": r["kind"], "content": json.loads(r["content"])} for r in rows
+        ]
 
     # ---- 讲解缓存 ----
 

@@ -4,13 +4,14 @@
 from .base import (
     ClaudeSettings,
     Explanation,
+    GameSummaryText,
     LLMConfig,
     LLMError,
     LLMFormatError,
     LLMProvider,
     OpenAICompatSettings,
 )
-from .context import EngineLine, ExplainContext, build_context
+from .context import EngineLine, ExplainContext, SummaryContext, build_context
 from .service import ExplainResult, ExplainService, make_provider
 
 __all__ = [
@@ -20,11 +21,13 @@ __all__ = [
     "ExplainResult",
     "ExplainService",
     "Explanation",
+    "GameSummaryText",
     "LLMConfig",
     "LLMError",
     "LLMFormatError",
     "LLMProvider",
     "OpenAICompatSettings",
+    "SummaryContext",
     "build_context",
     "make_provider",
 ]

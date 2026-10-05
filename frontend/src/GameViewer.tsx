@@ -8,8 +8,9 @@ import { ApiError, RESULT_TEXT, api, errorText } from "./api";
 import type { GameRecord, Mode, ReviewMove, Side } from "./api";
 import { positionFromFen, sideToMove } from "./fen";
 import { isTypingTarget } from "./keyboard";
+import AnnotatePanel, { useAnnotate } from "./AnnotatePanel";
 import ReviewPanel, { MoveReview, useLlmStatus } from "./ReviewPanel";
-import { gameHash, libraryBackHash, navigate } from "./router";
+import { gameHash, guessHash, libraryBackHash, navigate } from "./router";
 import { loadSettings, saveGameId } from "./settings";
 import { useAnalysis } from "./useAnalysis";
 import { useEngineStatus } from "./useEngineStatus";
@@ -39,6 +40,8 @@ export default function GameViewer({ id, initialPly }: GameViewerProps) {
   const review = useReview(id);
   const llm = useLlmStatus();
   const report = review.view?.status === "done" ? review.view.report : null;
+  const annotate = useAnnotate(id, !!report);
+  const [guessForm, setGuessForm] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -124,6 +127,33 @@ export default function GameViewer({ id, initialPly }: GameViewerProps) {
     }
   };
   const startFromHere = (mode: Mode) => startFrom(ply, mode);
+
+  // 猜着练习：执哪一方、开头跳过几步
+  const startGuess = async (side: Side, skip: number) => {
+    setBusy(true);
+    try {
+      const session = await api.startGuess(id, side, skip);
+      navigate(guessHash(session.id));
+    } catch (e) {
+      setError(errorText(e));
+      setBusy(false);
+    }
+  };
+
+  // 把这一步加入错题本：局面是走这步之前，正确着法是引擎推荐
+  const addCard = async (move: ReviewMove) => {
+    if (!record || !move.best_move) return false;
+    const result = await api.addCard({
+      fen: record.fens[move.ply - 1],
+      solution: move.best_move,
+      played: move.iccs,
+      source: `打谱：${players(record)} 第 ${move.ply} 步（${move.grade}）`,
+      source_game_id: record.id,
+      source_ply: move.ply,
+      explanation: move.explanation,
+    });
+    return result.created;
+  };
   // 复盘的「再试一次」：回到这步之前，由走这步的一方和 AI 重新下
   const retry = (move: ReviewMove) => startFrom(move.ply - 1, "vs_ai");
 
@@ -228,8 +258,16 @@ export default function GameViewer({ id, initialPly }: GameViewerProps) {
                 : "人机对战需要先安装象棋引擎"}>
               从这里和 AI 下
             </button>
+            <button onClick={() => setGuessForm((v) => !v)} disabled={busy || !engineReady || last === 0}
+              title={engineReady ? "跟着这盘棋一步步猜下一着，引擎打分" : "猜着练习要用引擎打分"}>
+              猜着练习
+            </button>
             <button onClick={() => void remove()} disabled={busy} className="danger">删除</button>
           </div>
+          {guessForm && (
+            <GuessForm busy={busy} onStart={(side, skip) => void startGuess(side, skip)}
+              onCancel={() => setGuessForm(false)} />
+          )}
           {record.source && <p className="muted small">来源：{record.source}</p>}
         </div>
 
@@ -240,8 +278,12 @@ export default function GameViewer({ id, initialPly }: GameViewerProps) {
 
         {report && ply > 0 && report.moves[ply - 1] && (
           <MoveReview llm={llm} move={report.moves[ply - 1]} loading={review.explaining === ply}
-            busy={review.explaining !== null} onExplain={(refresh) => void review.explain(ply, refresh)} />
+            busy={review.explaining !== null} onExplain={(refresh) => void review.explain(ply, refresh)}
+            intent={annotate.view?.moves.find((m) => m.ply === ply)?.intent}
+            onAddCard={() => addCard(report.moves[ply - 1])} />
         )}
+
+        {report && <AnnotatePanel annotate={annotate} ply={ply} engineReady={engineReady} onGo={go} />}
 
         <div className="card moves">
           <h2>着法</h2>
@@ -294,6 +336,38 @@ export default function GameViewer({ id, initialPly }: GameViewerProps) {
         <p className="hint-keys">快捷键：← → 后退 / 前进 · Home / End 开局 / 终局 · F 翻转棋盘</p>
       </aside>
     </main>
+  );
+}
+
+function GuessForm({ busy, onStart, onCancel }: {
+  busy: boolean;
+  onStart: (side: Side, skip: number) => void;
+  onCancel: () => void;
+}) {
+  const [side, setSide] = useState<Side>("red");
+  const [skip, setSkip] = useState(10);
+  return (
+    <div className="guess-form small">
+      <p>跟着这盘棋一步步猜你这一方的着法，每步 0–3 分，失分多的步会进错题本。</p>
+      <div className="segmented">
+        {(["red", "black"] as const).map((s) => (
+          <label key={s} className={side === s ? "active" : undefined}>
+            <input type="radio" name="guess-side" checked={side === s} onChange={() => setSide(s)} />
+            我执{s === "red" ? "红" : "黑"}
+          </label>
+        ))}
+      </div>
+      <label className="guess-skip">
+        开头跳过
+        <input type="number" min={0} max={60} value={skip}
+          onChange={(e) => setSkip(Math.max(0, Number(e.target.value) || 0))} />
+        步不猜（把时间花在中局和残局）
+      </label>
+      <div className="buttons">
+        <button className="primary" onClick={() => onStart(side, skip)} disabled={busy}>开始</button>
+        <button onClick={onCancel}>取消</button>
+      </div>
+    </div>
   );
 }
 

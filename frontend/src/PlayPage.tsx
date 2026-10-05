@@ -11,7 +11,7 @@ import type { GameView, HintLevel, HintView, NewGameOptions, Side } from "./api"
 import { sideToMove } from "./fen";
 import { isTypingTarget } from "./keyboard";
 import { MoveReview, useLlmStatus } from "./ReviewPanel";
-import { gameHash, navigate } from "./router";
+import { gameHash, navigate, trainHash } from "./router";
 import { loadLiveAnalysis, loadSavedGameId, saveGameId, saveLiveAnalysis } from "./settings";
 import { useAnalysis } from "./useAnalysis";
 import { useEngineStatus } from "./useEngineStatus";
@@ -48,6 +48,10 @@ export default function PlayPage() {
   const [liveOn, setLiveOn] = useState(loadLiveAnalysis);
   const aiRequested = useRef<string | null>(null);
   const llm = useLlmStatus();
+  const [due, setDue] = useState(0);
+  useEffect(() => {
+    api.trainSummary().then((s) => setDue(s.due), () => setDue(0));
+  }, []);
 
   const engineReady = engine?.ok ?? false;
   const thinking = !!game && thinkingFor === game.id;
@@ -266,6 +270,11 @@ export default function PlayPage() {
       </section>
 
       <aside className="side-panel">
+        {due > 0 && (
+          <a className="card due-banner" href={trainHash("review")}>
+            今日复习 <strong>{due}</strong> 题 →
+          </a>
+        )}
         {(showNewGame || !game) && (
           <NewGamePanel
             engineReady={engineReady}
@@ -384,7 +393,18 @@ export default function PlayPage() {
         {liveOn && engineReady && live.latest && (
           <MoveReview llm={llm} move={live.latest} loading={live.explaining} busy={live.explaining}
             onExplain={() => void live.explain()} canRefresh={false}
-            title={live.latest.terminal ? `刚才这步 · ${live.latest.terminal}` : "刚才这步"} />
+            title={live.latest.terminal ? `刚才这步 · ${live.latest.terminal}` : "刚才这步"}
+            onAddCard={async () => {
+              const m = live.latest!;
+              const result = await api.addCard({
+                fen: m.fen_before,
+                solution: m.best_move!,
+                played: m.iccs,
+                source: `对弈：第 ${m.ply} 步（${m.grade}）`,
+                explanation: m.explanation,
+              });
+              return result.created;
+            }} />
         )}
 
         <div className="card engine">

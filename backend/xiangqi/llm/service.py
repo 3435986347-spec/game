@@ -1,8 +1,11 @@
 """讲解流水线（docs 4.5 节），与具体模型无关：
 
-构建上下文 → 查缓存（局面 + 着法 + 评级 + 水平 + 模型）→ provider.complete_json
+构建上下文 → 查缓存（任务 + 局面 + 着法 + 评级 + 水平 + 模型）→ provider.complete_json
 → pydantic 校验结构 → 着法白名单校验 → 不通过时把问题告诉模型、重试 1 次
 → 仍不通过 / 网络错误 / 没配 Key：使用模板讲解 → 大模型的讲解写入缓存
+
+任务（TASKS）：讲解一步棋的对错（explain）、推断意图（intent）、整盘分阶段总结（summary），
+各有自己的提示词、输出结构和模板，流水线相同。
 """
 
 from __future__ import annotations
@@ -11,20 +14,43 @@ import asyncio
 import hashlib
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
-from .base import Explanation, LLMConfig, LLMError, LLMFormatError, LLMProvider
-from .context import ExplainContext
-from .prompts import PROMPT_VERSION, SYSTEM_PROMPT, retry_message, user_message
-from .templates import template_explanation
+from .base import Explanation, GameSummaryText, LLMConfig, LLMError, LLMFormatError, LLMProvider
+from .context import ExplainContext, SummaryContext
+from .prompts import (
+    INTENT_PROMPT,
+    PROMPT_VERSION,
+    SUMMARY_PROMPT,
+    SYSTEM_PROMPT,
+    retry_message,
+    user_message,
+)
+from .templates import template_explanation, template_intent, template_summary
 from .validate import problems, unknown_moves
 
 logger = logging.getLogger(__name__)
 
 _ATTEMPTS = 2  # 第一次 + 校验不通过时重试 1 次
+
+
+@dataclass(frozen=True)
+class Task:
+    name: str
+    system: str
+    schema: type[BaseModel]
+    template: Callable[[Any], BaseModel]
+
+
+TASKS = {
+    "explain": Task("explain", SYSTEM_PROMPT, Explanation, template_explanation),
+    "intent": Task("intent", INTENT_PROMPT, Explanation, template_intent),
+    "summary": Task("summary", SUMMARY_PROMPT, GameSummaryText, template_summary),
+}
 
 
 class ExplainCache(Protocol):
@@ -35,7 +61,7 @@ class ExplainCache(Protocol):
 
 @dataclass
 class ExplainResult:
-    explanation: Explanation
+    explanation: BaseModel  # Explanation；summary 任务为 GameSummaryText
     source: str  # llm | template
     provider: str | None = None
     model: str | None = None
@@ -77,17 +103,9 @@ def make_provider(config: LLMConfig) -> tuple[LLMProvider | None, str | None]:
     return None, None
 
 
-def cache_key(ctx: ExplainContext, provider: LLMProvider) -> str:
+def cache_key(ctx: ExplainContext | SummaryContext, provider: LLMProvider, task: str) -> str:
     text = "|".join(
-        [
-            PROMPT_VERSION,
-            ctx.position_key,
-            ctx.move,
-            ctx.grade or "",
-            ctx.level,
-            provider.name,
-            provider.model,
-        ]
+        [PROMPT_VERSION, task, ctx.cache_id(), ctx.level, provider.name, provider.model]
     )
     return hashlib.sha1(text.encode()).hexdigest()
 
@@ -135,18 +153,25 @@ class ExplainService:
             "level": self.config.level,
         }
 
-    async def explain(self, ctx: ExplainContext, *, use_cache: bool = True) -> ExplainResult:
+    async def explain(
+        self,
+        ctx: ExplainContext | SummaryContext,
+        *,
+        use_cache: bool = True,
+        task: str = "explain",
+    ) -> ExplainResult:
+        spec = TASKS[task]
         started = time.monotonic()
         provider = self.provider
         if provider is None:
             note = self.problem or "未配置大模型"
-            return self._template(ctx, note, started)
+            return self._template(spec, ctx, note, started)
 
-        key = cache_key(ctx, provider)
+        key = cache_key(ctx, provider, task)
         if use_cache and self.cache is not None:
             hit = await asyncio.to_thread(self.cache.get_explanation, key)
             try:
-                cached = Explanation.model_validate(hit) if hit is not None else None
+                cached = spec.schema.model_validate(hit) if hit is not None else None
             except ValidationError:  # 旧格式或损坏的缓存：当作没有缓存，重新生成后覆盖
                 cached = None
             if cached is not None:
@@ -159,7 +184,7 @@ class ExplainService:
                     elapsed=time.monotonic() - started,
                 )
 
-        original = user_message(ctx)
+        original = user_message(ctx.data, task)
         user = original
         fabricated: list[str] = []
         note: str | None = None
@@ -168,7 +193,7 @@ class ExplainService:
             attempts += 1
             try:
                 explanation = await asyncio.wait_for(
-                    provider.complete_json(SYSTEM_PROMPT, user, Explanation),
+                    provider.complete_json(spec.system, user, spec.schema),
                     self.config.timeout_s + 10,
                 )
             except LLMFormatError as e:  # 结构不对：可以重试
@@ -209,12 +234,14 @@ class ExplainService:
             note = "大模型的讲解没有通过校验：" + "；".join(issues)
             user = retry_message(original, explanation, issues)
 
-        result = self._template(ctx, note, started)
+        result = self._template(spec, ctx, note, started)
         result.provider, result.model = provider.name, provider.model
         result.attempts, result.fabricated = attempts, fabricated
         return result
 
-    def _template(self, ctx: ExplainContext, note: str | None, started: float) -> ExplainResult:
+    def _template(
+        self, spec: Task, ctx: ExplainContext | SummaryContext, note: str | None, started: float
+    ) -> ExplainResult:
         return ExplainResult(
-            template_explanation(ctx), "template", note=note, elapsed=time.monotonic() - started
+            spec.template(ctx), "template", note=note, elapsed=time.monotonic() - started
         )

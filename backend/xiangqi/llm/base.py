@@ -24,6 +24,15 @@ class Explanation(BaseModel):
     tags: list[str] = Field(description="标签，如 无根子、贪吃，用于归类")
 
 
+class GameSummaryText(BaseModel):
+    """名局解读的分阶段总结（docs 5.5 节）。"""
+
+    opening: str = Field(description="开局：布局名称和双方的思路")
+    middlegame: str = Field(description="中局：主要计划和转折点")
+    endgame: str = Field(description="残局（或终局）：胜负的关键")
+    overall: str = Field(description="一句话总评")
+
+
 class LLMError(RuntimeError):
     """调用大模型失败（网络、Key、限流、拒答等）。message 直接显示给用户。"""
 

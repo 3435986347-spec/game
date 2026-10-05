@@ -267,6 +267,8 @@ export interface MoveAnalysis extends ReviewMove {
   red_win: number;
   /** 走完这步棋局结束时的说明 */
   terminal: string | null;
+  /** 走这步之前的局面 */
+  fen_before: string;
 }
 
 export interface SideStats {
@@ -305,6 +307,206 @@ export interface ReviewView {
   report: ReviewReport | null;
 }
 
+// ---------- 名局解读 ----------
+
+export interface GameSummaryText {
+  opening: string;
+  middlegame: string;
+  endgame: string;
+  overall: string;
+  source: "llm" | "template";
+  provider: string | null;
+  model: string | null;
+  note: string | null;
+}
+
+export interface AnnotatedMove {
+  ply: number;
+  side: Side;
+  cn: string;
+  grade: Grade;
+  phase: string;
+  red_before: number;
+  red_after: number;
+  /** 这步棋的意图（headline 为一句话结论） */
+  intent: Explanation;
+}
+
+export interface AnnotateView {
+  game_id: number;
+  status: "none" | "running" | "done" | "error";
+  progress: number;
+  total: number;
+  error: string | null;
+  summary: GameSummaryText | null;
+  moves: AnnotatedMove[];
+}
+
+// ---------- 猜着练习 ----------
+
+export interface GuessAnswer {
+  ply: number;
+  fen_before: string;
+  user_move: string | null;
+  user_cn: string | null;
+  master_move: string;
+  master_cn: string;
+  /** 0–3 分 */
+  points: number;
+  loss: number | null;
+  same: boolean;
+  /** 和大师不同，但引擎认为不差 */
+  as_good: boolean;
+  master_not_best: boolean;
+  best_move: string | null;
+  best_cn: string | null;
+  user_score: number | null;
+  master_score: number | null;
+  explanation: Explanation | null;
+}
+
+export interface GuessSummary {
+  answered: number;
+  matched: number;
+  match_rate: number | null;
+  avg_loss: number | null;
+  worst: number[];
+  cards_added: number;
+}
+
+export interface GuessSession {
+  id: number;
+  game_id: number;
+  red: string | null;
+  black: string | null;
+  event: string | null;
+  side: Side;
+  start_ply: number;
+  /** 当前局面走了多少步；没结束时轮到你猜下一步 */
+  current_ply: number;
+  total_plies: number;
+  score: number;
+  max_score: number;
+  finished: boolean;
+  initial_fen: string;
+  fen: string;
+  last_move: string | null;
+  in_check: boolean;
+  legal_moves: string[];
+  moves: LibraryMove[];
+  answers: GuessAnswer[];
+  summary: GuessSummary | null;
+}
+
+export interface GuessSessionItem {
+  id: number;
+  game_id: number;
+  red: string | null;
+  black: string | null;
+  event: string | null;
+  side: Side;
+  score: number;
+  max_score: number;
+  finished: boolean;
+  current_ply: number;
+  total_plies: number | null;
+  created_at: string;
+}
+
+// ---------- 训练 ----------
+
+export interface TagCount {
+  tag: string;
+  count: number;
+}
+
+export interface TrainSummary {
+  /** 今天要复习的题数 */
+  due: number;
+  due_mistakes: number;
+  due_puzzles: number;
+  cards: number;
+  puzzles: number;
+  puzzles_attempted: number;
+  puzzles_solved: number;
+  /** 做题等级分 */
+  rating: number;
+  themes: TagCount[];
+}
+
+/** 一道练习题的局面（错题本的卡片或题库里的题） */
+export interface ExercisePosition {
+  id: number;
+  fen: string;
+  turn: Side;
+  legal_moves: string[];
+  in_check: boolean;
+}
+
+export interface TrainCard extends ExercisePosition {
+  kind: "mistake" | "puzzle";
+  played: string | null;
+  played_cn: string | null;
+  source: string | null;
+  source_game_id: number | null;
+  source_ply: number | null;
+  reps: number;
+  lapses: number;
+  interval_days: number;
+  due_at: string;
+  created_at: string;
+}
+
+export interface TrainCardItem extends TrainCard {
+  solution: string;
+  solution_cn: string;
+}
+
+export interface TrainResult {
+  correct: boolean;
+  move: string | null;
+  move_cn: string | null;
+  solution: string;
+  solution_cn: string;
+  /** 正解及之后的变化 */
+  pv_cn: string[];
+  explanation: Explanation | null;
+}
+
+export interface CardResult extends TrainResult {
+  /** 下次复习间隔（天）；0 表示 10 分钟后再出 */
+  interval_days: number;
+  due_at: string;
+  due: number;
+}
+
+export interface Puzzle extends ExercisePosition {
+  rating: number;
+  attempts: number;
+  theme: string | null;
+}
+
+export interface PuzzleResult extends TrainResult {
+  tags: string[];
+  puzzle_rating: number;
+  rating_before: number;
+  rating_after: number;
+  card_added: boolean;
+  master_found: boolean | null;
+  source_game_id: number | null;
+  source_ply: number | null;
+}
+
+export interface AddCardBody {
+  fen: string;
+  solution: string;
+  played?: string | null;
+  source?: string;
+  source_game_id?: number | null;
+  source_ply?: number | null;
+  explanation?: Explanation | null;
+}
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -334,6 +536,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(resp.status, detail);
   }
   return resp.json() as Promise<T>;
+}
+
+/** 错题本有变化（作答、加入、移出）时发出，导航上的到期题数据此刷新。 */
+export const TRAIN_CHANGED = "train-changed";
+
+function changesTraining<T>(promise: Promise<T>): Promise<T> {
+  return promise.then((result) => {
+    window.dispatchEvent(new Event(TRAIN_CHANGED));
+    return result;
+  });
 }
 
 export const api = {
@@ -405,6 +617,71 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ ply }),
     }),
+
+  getAnnotate: (libraryId: number) =>
+    request<AnnotateView>(`/api/library/games/${libraryId}/annotate`),
+  startAnnotate: (libraryId: number, force = false) =>
+    request<AnnotateView>(`/api/library/games/${libraryId}/annotate`, {
+      method: "POST",
+      body: JSON.stringify({ force }),
+    }),
+
+  startGuess: (gameId: number, side: Side, skipPlies: number) =>
+    request<GuessSession>("/api/guess", {
+      method: "POST",
+      body: JSON.stringify({ game_id: gameId, side, skip_plies: skipPlies }),
+    }),
+  getGuess: (id: number) => request<GuessSession>(`/api/guess/${id}`),
+  /** move 为 null 表示不会，直接看大师着法 */
+  answerGuess: (id: number, move: string | null) =>
+    changesTraining(
+      request<{ answer: GuessAnswer; session: GuessSession }>(`/api/guess/${id}/answer`, {
+        method: "POST",
+        body: JSON.stringify({ move }),
+      }),
+    ),
+  listGuesses: () => request<GuessSessionItem[]>("/api/guess"),
+  deleteGuess: (id: number) =>
+    request<{ deleted: boolean }>(`/api/guess/${id}`, { method: "DELETE" }),
+
+  trainSummary: () => request<TrainSummary>("/api/train/summary"),
+  /** 今天要复习几题 */
+  trainDue: () => request<{ due: number }>("/api/train/due"),
+  nextCard: () => request<{ card: TrainCard | null; due: number }>("/api/train/next"),
+  answerCard: (id: number, move: string | null) =>
+    changesTraining(
+      request<CardResult>(`/api/train/cards/${id}/answer`, {
+        method: "POST",
+        body: JSON.stringify({ move }),
+      }),
+    ),
+  explainCard: (id: number) =>
+    request<Explanation>(`/api/train/cards/${id}/explain`, { method: "POST" }),
+  listCards: () => request<TrainCardItem[]>("/api/train/cards"),
+  addCard: (body: AddCardBody) =>
+    changesTraining(
+      request<{ card_id: number | null; created: boolean }>("/api/train/cards", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    ),
+  deleteCard: (id: number) =>
+    changesTraining(
+      request<{ deleted: boolean }>(`/api/train/cards/${id}`, { method: "DELETE" }),
+    ),
+  nextPuzzle: (theme?: string | null, exclude?: number | null) =>
+    request<{ puzzle: Puzzle | null; rating: number }>(
+      `/api/train/puzzle?${queryString({ theme, exclude })}`,
+    ),
+  attemptPuzzle: (id: number, move: string | null) =>
+    changesTraining(
+      request<PuzzleResult>(`/api/train/puzzles/${id}/attempt`, {
+        method: "POST",
+        body: JSON.stringify({ move }),
+      }),
+    ),
+  explainPuzzle: (id: number) =>
+    request<Explanation>(`/api/train/puzzles/${id}/explain`, { method: "POST" }),
 };
 
 /** 查询参数，空值不发送。 */

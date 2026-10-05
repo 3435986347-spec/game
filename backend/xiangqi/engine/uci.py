@@ -320,13 +320,21 @@ class UciEngine:
         *,
         limit: Limit,
         multipv: int = 1,
+        searchmoves: Sequence[str] = (),
     ) -> AnalysisResult:
-        """在给定局面（初始 FEN + 之后的着法）上搜索，直到满足 limit。"""
+        """在给定局面（初始 FEN + 之后的着法）上搜索，直到满足 limit。
+
+        searchmoves 不为空时只搜索这些着法（ICCS）：同一次搜索里给出它们各自的评估，可以直接比较。
+        """
         async with self._lock:
             self._ensure_alive()
             self._messages = []
             await self._prepare(fen, moves, multipv)
-            self._send(limit.go_command())
+            go = limit.go_command()
+            if searchmoves:
+                engine_moves = (to_engine_move(m, self.flavor) for m in searchmoves)
+                go += " searchmoves " + " ".join(engine_moves)
+            self._send(go)
             lines: dict[int, InfoLine] = {}
             latest: dict[int, InfoLine] = {}  # 每条候选最后一次输出（包括上下界）
             try:

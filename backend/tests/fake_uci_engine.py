@@ -1,6 +1,7 @@
 """测试用的假 UCI 引擎。
 
 用本项目的规则引擎生成合法着法，按 ICCS 字母顺序排列并给出固定分数，行为完全可预测。
+支持 go ... searchmoves（只在给定的着法里排序打分）。
 参数：
   --flavor=fairy   模拟 Fairy-Stockfish：行号 1–10，且必须先设置 UCI_Variant=xiangqi
   --die-on-go      收到 go 时像缺少权重文件的 Pikafish 一样报错退出
@@ -47,9 +48,12 @@ class State:
     variant = "chess"
 
 
-def emit(depth: int) -> str | None:
+def emit(depth: int, only: set[str] | None = None) -> str | None:
     pos = State.position
-    moves = sorted(move_to_iccs(m) for m in pos.legal_moves())[: State.multipv]
+    moves = sorted(move_to_iccs(m) for m in pos.legal_moves())
+    if only:
+        moves = [m for m in moves if m in only]
+    moves = moves[: State.multipv]
     for k, move in enumerate(moves, 1):
         cp = 60 - 20 * k
         wdl = f" wdl {300 + cp} 500 {200 - cp}" if State.show_wdl else ""
@@ -131,9 +135,13 @@ def main() -> None:
                 if nxt == "quit":
                     return
             else:
+                tokens = cmd.split()
+                only = None
+                if "searchmoves" in tokens:
+                    only = {from_engine(t) for t in tokens[tokens.index("searchmoves") + 1 :]}
                 best = None
                 for depth in (1, 2, 3):
-                    best = emit(depth)
+                    best = emit(depth, only)
                 if best is None:
                     out("info depth 0 score mate 0")
                 out(f"bestmove {to_engine(best) if best else '(none)'}")

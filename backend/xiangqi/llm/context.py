@@ -8,6 +8,8 @@ allowed_moves_cn 列出讲解中允许出现的全部着法，用于事后校验
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 
 from ..core import RED, Move, Position, move_to_chinese, move_to_iccs, parse_iccs
@@ -71,6 +73,31 @@ class ExplainContext:
     tags: list[str]
     phase: str
     level: str
+    extra: tuple[str, ...] = ()  # 调用方补充的事实（如猜着时大师的着法）
+
+    def cache_id(self) -> str:
+        """缓存键里和内容有关的部分：局面 + 着法 + 评级，以及调用方补充的事实。"""
+        key = f"{self.position_key}|{self.move}|{self.grade or ''}"
+        return f"{key}|{'；'.join(self.extra)}" if self.extra else key
+
+
+@dataclass
+class SummaryContext:
+    """名局解读的分阶段总结用的上下文。"""
+
+    data: dict
+    allowed_keys: set[str]
+    level: str
+    # 模板总结用
+    opening: str | None
+    result_text: str
+    phase_points: dict[str, list[str]]  # 阶段 → 该阶段转折点的描述
+    accuracy: dict[str, str]  # 阶段 → 「红 90 · 黑 85」
+
+    def cache_id(self) -> str:
+        """按交给大模型的全部内容：重新复盘后转折点、准确率变了，旧的总结随之失效。"""
+        text = json.dumps(self.data, ensure_ascii=False, sort_keys=True)
+        return "summary|" + hashlib.sha1(text.encode()).hexdigest()
 
 
 def board_text(board: list[int]) -> list[str]:
@@ -175,16 +202,22 @@ def build_context(
     win_after: float | None,
     grade: str | None,
     level: str,
+    extra_facts: list[str] | None = None,
+    extra_allowed: list[tuple[list[int], Move]] | None = None,
 ) -> ExplainContext:
     """pos：走这步之前的局面；before：这个局面的引擎候选（走棋方视角，最好的在前）；
     after：走完之后局面的引擎候选（对方视角，第一条即对方的最佳应着）；
-    win_before / win_after：走棋方在走这步之前（按最佳着法）/ 之后的期望得分。"""
+    win_before / win_after：走棋方在走这步之前（按最佳着法）/ 之后的期望得分；
+    extra_facts：调用方补充的事实（如猜着时「大师走的是……」），其中的着法须在 before 的前 3 名里，
+    或者放进 extra_allowed（(棋盘, 着法)，如空着法时的威胁）。"""
     b = pos.board
     mover = pos.turn
     me, opp = SIDE_NAME[mover], SIDE_NAME[-mover]
     move_iccs = move_to_iccs(move)
     moves = _Moves()
     move_cn = moves.add(b, move)
+    for board, extra in extra_allowed or []:
+        moves.add(board, extra)
 
     after_pos = pos.copy()
     after_pos.push(move)
@@ -209,8 +242,19 @@ def build_context(
         tag("将军")
 
     # ---- 走完之后：自己的子是否安全 ----
-    before_mine = {t.square for t in threatened(b, mover)}
-    for t in threatened(a, mover):
+    mine_before = threatened(b, mover)
+    before_mine = {t.square for t in mine_before}
+    after_mine = threatened(a, mover)
+    after_squares = {t.square for t in after_mine}
+    for t in mine_before:
+        if t.square == move[0]:
+            if to not in after_squares:
+                facts.append(f"{move_cn}让原本受到攻击的{piece_name(b[t.square])}躲开了")
+                tag("解除威胁")
+        elif t.square not in after_squares:
+            facts.append(f"这步之后，{me}的{describe(b, t.square)}不再处于危险之中")
+            tag("解除威胁")
+    for t in after_mine:
         text = threat_text(a, t)
         if t.square == to:
             fact = f"走完后{text}"
@@ -315,6 +359,10 @@ def build_context(
                 key_facts.append(fact)
                 tag("亏子")
 
+    for fact in extra_facts or []:
+        facts.append(fact)
+        key_facts.append(fact)
+
     phase = game_phase(pos)
     tag(phase)
 
@@ -362,4 +410,5 @@ def build_context(
         tags=tags,
         phase=phase,
         level=level,
+        extra=tuple(extra_facts or ()),
     )

@@ -14,10 +14,9 @@ from fastapi import APIRouter, HTTPException, Request
 from ..core import RED, Position, move_to_chinese, parse_iccs
 from ..core.variation import pv_to_chinese
 from ..engine import Limit
-from ..training import MoveGrade, PositionEval, evaluate_position, grade_last_move
+from ..training import MoveGrade, PositionEval, evaluate_position, grade_last_move, move_context
 from .games import Game, run_engine
 from .games import _get as get_game
-from .review import move_context
 from .schemas import ExplainRequest, ExplanationView, MoveAnalysisView
 
 router = APIRouter(prefix="/api/games", tags=["边下边分析"])
@@ -78,6 +77,7 @@ async def analyse_move(game_id: str, body: ExplainRequest, request: Request) -> 
         explanation=game.move_explanations.get(history),
         red_win=after.red_win,
         terminal=after.terminal,
+        fen_before=pos.fen(),
     )
 
 
