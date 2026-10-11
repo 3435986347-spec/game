@@ -162,6 +162,10 @@ def threat_text(board: list[int], threat: Threat) -> str:
 def gives_check(board: list[int], move: Move) -> bool:
     frm, to = move
     piece, captured = board[frm], board[to]
+    if captured * piece < 0 and abs(captured) == KING:
+        # 吃掉对方帅/将：引擎把「吃将」也当作将军着法。对方帅已不在棋盘上，
+        # 不能再调用 in_check（找不到帅会报错）。
+        return True
     board[to], board[frm] = piece, 0
     try:
         return in_check(board, -side_of_piece(piece))
@@ -179,6 +183,9 @@ def mating_moves(board: list[int], side: int) -> list[Move]:
     out: list[Move] = []
     for frm, to in checking_moves(board, side):
         piece, captured = board[frm], board[to]
+        if captured * side < 0 and abs(captured) == KING:
+            out.append((frm, to))  # 吃掉帅/将 = 一步杀
+            continue
         board[to], board[frm] = piece, 0
         try:
             if not legal_moves(board, -side):

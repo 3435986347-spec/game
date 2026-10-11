@@ -1,9 +1,13 @@
 """模板讲解：不调用大模型时使用（没配 Key、网络错误、大模型输出两次都不合格）。
 
 只用上下文里算好的事实拼句子，着法也只取自上下文，所以不会出现编造的着法；只是没那么自然。
+原则：以「这步棋想干什么 / 出了什么问题」为主线（ctx.purpose），少罗列事实、去掉坐标，
+每个字段控制在两三句以内，让初学者能看懂。
 """
 
 from __future__ import annotations
+
+import re
 
 from .base import Explanation, GameSummaryText
 from .context import ExplainContext, SummaryContext
@@ -26,61 +30,94 @@ _PRINCIPLES = [
     ("残局", "残局里帅（将）也能参加战斗，兵卒越往前越有价值。"),
 ]
 
+_COORD = re.compile(r"\([a-i]\d\)")
+
 
 def _pct(x: float) -> str:
     return f"{round(x * 100)}%"
 
 
-def _is_positive(fact: str) -> bool:
-    """这步棋做成了什么：吃子、将军、捉子、杀棋威胁、解除威胁。"""
-    return (
-        "吃掉了" in fact
-        or fact.endswith("将军")
-        or fact.startswith("这步棋之后")
-        or "就能将死对方" in fact
-        or "不再处于危险之中" in fact
-        or "躲开了" in fact
-    )
+def _swing_text(before: float, after: float) -> str:
+    """期望得分变化的说法，方向敏感：升到 / 降到 / 保持在。"""
+    if after > before + 0.005:
+        return f"期望得分从{_pct(before)}升到{_pct(after)}"
+    if after < before - 0.005:
+        return f"期望得分从{_pct(before)}降到{_pct(after)}"
+    return f"期望得分保持在{_pct(before)}"
+
+
+def _humanize(fact: str) -> str:
+    """把规则引擎的机器事实改写成更口语、更短的说法：去掉坐标、简化句式。"""
+    text = _COORD.sub("", fact)
+    text = re.sub(r"方 ([车马炮卒兵将士象帅将])", r"方的\1", text)  # 「红方 炮」→「红方的炮」
+    text = re.sub(r"\s{2,}", " ", text)
+    text = text.replace("这步棋之后", "现在").replace("这步之后", "现在")
+    text = text.replace("走完这步之后", "现在").replace("走完后", "现在")
+    text = text.replace("走这步之前", "走之前")
+    text = text.replace("：这是一枚无根子", "")
+    text = text.replace("，而且没有保护", "，没有保护")
+    text = text.replace("如果黑方不应对，红方下一步", "黑方若不应，红方下一步")
+    text = text.replace("如果红方不应对，黑方下一步", "红方若不应，黑方下一步")
+    text = text.replace("就能将死对方", "将死")
+    return text.strip()
 
 
 def template_explanation(ctx: ExplainContext) -> Explanation:
     grade = ctx.grade
     best_differs = bool(ctx.best) and ctx.best[0][0] != ctx.move_cn
+    bad = grade is not None and grade in (*_BAD, "缓着")
     swing = ""
     if ctx.win_before is not None and ctx.win_after is not None:
-        swing = f"期望得分从{_pct(ctx.win_before)}降到{_pct(ctx.win_after)}"
-    key = ctx.key_facts[0] if ctx.key_facts else None
-    good = grade is None or grade not in (*_BAD, "缓着")
-    # 讲好棋（或不评级，如讲正解）时先说这步做成了什么，不先说别处的问题
-    positive = [f for f in ctx.facts if _is_positive(f)]
-    ordered = [*positive, *ctx.key_facts] if good else [*ctx.key_facts, *positive]
+        swing = _swing_text(ctx.win_before, ctx.win_after)
+    key = _humanize(ctx.key_facts[0]) if ctx.key_facts else None
+    purpose = ctx.purpose.rstrip("。") if ctx.purpose else None
 
-    # 标题：坏棋优先用最能说明问题的事实；没有这类事实时说损失了多少，不拿「吃了什么」凑数
+    # 标题：坏棋用最能说明问题的事实；好棋/正解以「目的」为主线
     if grade in _BAD:
-        headline_fact = key
         headline = f"{ctx.move_cn}是{grade}：{key or swing or '局面因此明显变差'}。"
     elif grade == "缓着":
-        headline_fact = None
         headline = f"{ctx.move_cn}有点缓，错过了更好的机会。"
     elif grade:
-        headline_fact = None
-        headline = f"{ctx.move_cn}是{grade}。"
+        headline = (
+            f"{ctx.move_cn}是{grade}：{purpose}。" if purpose else f"{ctx.move_cn}是{grade}。"
+        )
+    elif purpose:
+        headline = f"{ctx.move_cn}：{purpose}。"
     else:
-        headline_fact = next(iter(ordered), None) or (ctx.facts[0] if ctx.facts else None)
-        headline = f"{ctx.move_cn}：{headline_fact}。" if headline_fact else f"关于{ctx.move_cn}。"
+        headline = f"关于{ctx.move_cn}。"
 
-    # 原因：其余的事实，不重复标题，也不重复「更好的下法」那一栏
+    # 原因：坏棋讲对方会怎么惩罚、问题在哪；好棋讲对方怎么应对。
+    # purpose 已经把「想法」概括进标题，这里不再重复罗列事实。
     why_parts: list[str] = []
-    for fact in [*ordered, *ctx.facts]:
-        if fact != headline_fact and fact not in why_parts and not fact.startswith("引擎认为"):
-            why_parts.append(fact)
-    why_parts = why_parts[:2]
     if ctx.reply and not any(ctx.reply[0] in f for f in why_parts):
-        effect = f"，{ctx.reply[1]}" if ctx.reply[1] else ""
-        why_parts.append(f"这步之后对方最好的应着是{ctx.reply[0]}{effect}")
-    if swing and swing not in headline:
-        why_parts.append(f"走这步前期望得分约{_pct(ctx.win_before)}，走完后约{_pct(ctx.win_after)}")
-    why = "；".join(why_parts) + "。" if why_parts else "引擎没有发现明显的问题。"
+        effect = _humanize(ctx.reply[1]) if ctx.reply[1] else ""
+        reply_text = f"对方最好应以{ctx.reply[0]}"
+        if effect:
+            reply_text += f"（{effect}）"
+        why_parts.append(reply_text)
+    if bad:
+        for fact in ctx.key_facts:
+            human = _humanize(fact)
+            if human == key or human in why_parts:
+                continue
+            if ctx.reply and ctx.reply[0] in fact:
+                continue  # 「对方最好应以……」已经说过了
+            if "按这步加引擎主要变化" in fact and swing:
+                continue  # 期望得分的变化已经概括了子力得失，不重复
+            why_parts.append(human)
+            if len(why_parts) >= 3:
+                break
+    for fact in ctx.extra:
+        # 调用方补充的事实（飞刀说明、猜着时「大师走的是……」）：无论好坏都值得说一句
+        human = _humanize(fact)
+        if human not in why_parts:
+            why_parts.append(human)
+    if swing and swing not in headline and (
+        bad or (ctx.win_before is not None and ctx.win_after is not None
+               and abs(ctx.win_before - ctx.win_after) >= 0.02)
+    ):
+        why_parts.append(swing)
+    why = "；".join(why_parts[:3]) + "。" if why_parts else "局面比较平稳。"
 
     if best_differs:
         name, score, pv = ctx.best[0]
@@ -113,18 +150,18 @@ def template_intent(ctx: ExplainContext) -> Explanation:
     if "杀棋威胁" in ctx.tags:
         headline, used = f"{ctx.move_cn}：制造杀棋威胁，逼对方应付。", None
     elif threat:
-        headline, used = f"{ctx.move_cn}：{threat}。", threat
+        headline, used = f"{ctx.move_cn}：{_humanize(threat)}。", threat
     elif "捉双" in ctx.tags:
         headline, used = f"{ctx.move_cn}：一步棋同时攻击两个目标。", None
     elif target:
-        headline, used = f"{ctx.move_cn}：{target}。", target
+        headline, used = f"{ctx.move_cn}：{_humanize(target)}。", target
     elif capture:
-        headline, used = f"{ctx.move_cn}：{capture}。", capture
+        headline, used = f"{ctx.move_cn}：{_humanize(capture)}。", capture
     elif "解除威胁" in ctx.tags:
         headline, used = f"{ctx.move_cn}：先解除自己受到的威胁。", None
     else:
         headline, used = f"{ctx.move_cn}：调整子力位置，为后面的走法做准备。", None
-    why_parts = [f for f in facts if f != used][:3]
+    why_parts = [_humanize(f) for f in facts if f != used][:3]
     why = "；".join(why_parts) + "。" if why_parts else "局面比较平稳，这步没有直接的战术目的。"
 
     if ctx.best and ctx.best[0][0] != ctx.move_cn:

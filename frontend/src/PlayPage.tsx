@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { AnalysisPanel, EvalBar } from "./AnalysisPanel";
+import { AnalysisPanel, EvalBar, TrapChip } from "./AnalysisPanel";
 import Board from "./Board";
 import type { Arrow } from "./Board";
 import ExplorerPanel from "./ExplorerPanel";
@@ -287,6 +287,12 @@ export default function PlayPage() {
 
         {game && pos && (
           <div className="card status">
+            {game.book_name && (
+              <div className="trap-banner" title="本局使用了飞刀开局">
+                飞刀开局：<strong>{game.book_name}</strong>
+                {game.mode === "vs_ai" ? " · 对方按剧本走，变招即应变" : " · 自由对弈"}
+              </div>
+            )}
             {pos.result ? (
               <>
                 <div className="result">{resultText(game)}</div>
@@ -358,7 +364,18 @@ export default function PlayPage() {
         {visibleHint && (
           <div className="card hint">
             <h2>{["提示：方向", "提示：动哪个子", "提示：推荐着法"][visibleHint.level - 1]}</h2>
+            {visibleHint.alert && (
+              <div className={`trap-alert ${visibleHint.alert.kind}`} role="alert">
+                <strong>{visibleHint.alert.kind === "warn" ? "小心飞刀" : "飞刀机会"}</strong>
+                <span>{visibleHint.alert.advice}</span>
+              </div>
+            )}
             <p>{visibleHint.text}</p>
+            {visibleHint.trap && (
+              <p className="hint-trap">
+                <TrapChip trap={visibleHint.trap} /> {visibleHint.trap.note}
+              </p>
+            )}
           </div>
         )}
 

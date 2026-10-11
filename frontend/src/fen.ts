@@ -1,6 +1,10 @@
 // 只用于显示的 FEN 解析：把局面字符串变成棋盘数组，不做任何规则判断（规则都在后端）。
 import type { PositionView, Side } from "./api";
 
+/** 标准开局局面（与后端 core 的 START_FEN 一致）。 */
+export const START_FEN =
+  "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1";
+
 /** FEN 中轮到哪一方走（"w" / "r" 为红方，"b" 为黑方）。 */
 export function sideToMove(fen: string): Side {
   return fen.trim().split(/\s+/)[1] === "b" ? "black" : "red";

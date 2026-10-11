@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import type { LevelInfo, Mode, NewGameOptions, Side } from "./api";
+import type { LevelInfo, Mode, NewGameOptions, Side, TrapSummary } from "./api";
+import { api } from "./api";
 import { loadSettings, saveSettings } from "./settings";
 
 const DEFAULT_LEVELS: LevelInfo[] = Array.from({ length: 10 }, (_, i) => ({
@@ -17,7 +18,7 @@ interface NewGamePanelProps {
   onCancel?: () => void;
 }
 
-/** 新对局设置：模式、执哪一方、难度，可选从 FEN 局面开始。 */
+/** 新对局设置：模式、执哪一方、难度、开局飞刀，可选从 FEN 局面开始。 */
 export default function NewGamePanel({
   engineReady,
   engineChecking = false,
@@ -27,14 +28,22 @@ export default function NewGamePanel({
 }: NewGamePanelProps) {
   const [settings, setSettings] = useState(loadSettings);
   const [fen, setFen] = useState("");
+  const [trapId, setTrapId] = useState<string>("");
+  const [traps, setTraps] = useState<TrapSummary[]>([]);
   const mode: Mode = engineReady ? settings.mode : "free";
   const levelList = levels.length ? levels : DEFAULT_LEVELS;
   const levelName = levelList.find((l) => l.level === settings.ai_level)?.name;
 
+  useEffect(() => {
+    api.listTraps().then(setTraps, () => setTraps([]));
+  }, []);
+
   const submit = (e: FormEvent) => {
     e.preventDefault();
     saveSettings(settings); // 保存用户自己的选择，而不是因引擎不可用临时改成的自由对弈
-    onStart({ ...settings, mode, fen: fen.trim() || undefined });
+    const trap = trapId || null;
+    // 飞刀局：AI 执刀方按剧本走，你执受害者一方破解（难度仍有效：剧本走完或你变招后按难度下）
+    onStart({ ...settings, mode, fen: fen.trim() || undefined, trap_id: trap });
   };
 
   return (
@@ -58,7 +67,7 @@ export default function NewGamePanel({
         </p>
       )}
 
-      {mode === "vs_ai" && (
+      {mode === "vs_ai" && !trapId && (
         <>
           <fieldset className="segmented" aria-label="我执">
             {(["red", "black"] as Side[]).map((side) => (
@@ -78,6 +87,32 @@ export default function NewGamePanel({
               onChange={(e) => setSettings({ ...settings, ai_level: Number(e.target.value) })} />
           </label>
         </>
+      )}
+
+      {traps.length > 0 && (
+        <label className="trap-select">
+          <span>开局飞刀（弃子陷阱，AI 按剧本走、你破解）</span>
+          <select value={trapId} onChange={(e) => setTrapId(e.target.value)}>
+            <option value="">不用飞刀</option>
+            <option value="random">随机飞刀</option>
+            {traps.map((trap) => (
+              <option key={trap.id} value={trap.id}>
+                {trap.name}（{trap.side === "red" ? "红" : "黑"}执刀）
+              </option>
+            ))}
+          </select>
+          {mode === "vs_ai" && trapId && (
+            <span className="muted small">
+              飞刀局里你执受害者一方破解；剧本走完或你变招后，AI 按难度 {settings.ai_level}（
+              {levelName ?? ""}）应变。
+            </span>
+          )}
+          {mode === "free" && trapId && (
+            <span className="muted small">
+              自由对弈会预摆到陷阱着法前一步，双方接着下；实时分析会标注飞刀。
+            </span>
+          )}
+        </label>
       )}
 
       <input className="fen-input" value={fen} onChange={(e) => setFen(e.target.value)}

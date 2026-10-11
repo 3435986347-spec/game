@@ -498,10 +498,15 @@ def _snapshot(lines: dict[int, InfoLine]) -> list[InfoLine]:
 def _read_lines(
     proc: subprocess.Popen[str], queue: asyncio.Queue[str | None], loop: asyncio.AbstractEventLoop
 ) -> None:
-    """读线程：把引擎输出逐行放进队列，进程结束时放入 None。"""
+    """读线程：把引擎输出逐行放进队列，进程结束时放入 None。
+
+    事件循环关闭（如进程退出、测试结束）时线程也要安静收尾，不能抛异常。"""
     try:
         for line in proc.stdout:  # type: ignore[union-attr]
-            loop.call_soon_threadsafe(queue.put_nowait, line.rstrip("\r\n"))
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, line.rstrip("\r\n"))
+            except RuntimeError:
+                return  # 事件循环已关闭
     except (OSError, ValueError):
         pass
     try:

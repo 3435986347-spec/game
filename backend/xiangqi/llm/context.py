@@ -26,6 +26,7 @@ from ..core.features import (
     threat_text,
     threatened,
 )
+from ..core.intent import purpose_of_move
 from ..core.movegen import in_check
 from ..core.notation import chinese_variants
 from .validate import move_key
@@ -68,6 +69,7 @@ class ExplainContext:
     win_after: float | None
     best: list[tuple[str, float, list[str]]]  # (着法, 走棋方期望得分, 主要变化)
     reply: tuple[str, str] | None  # (对方最佳应着, 效果)
+    purpose: str  # 规则引擎对「这步想干什么」的一句话概括（模板讲解的主线，也交给大模型）
     facts: list[str]
     key_facts: list[str]  # 最能说明问题的事实（模板讲解的「原因」）
     tags: list[str]
@@ -366,6 +368,17 @@ def build_context(
     phase = game_phase(pos)
     tag(phase)
 
+    # 「这步棋想干什么」的一句话概括：模板讲解的主线，也交给大模型作为锚点（deep=False：
+    # 一步杀威胁的事实上面已经放进 facts，这里不再重复计算、也不引入新的着法名）。
+    purpose = purpose_of_move(
+        pos,
+        move_iccs,
+        pv=list(after[0].pv)[:3] if after else None,
+        score_before=win_before,
+        score_after=win_after,
+        deep=False,
+    )
+
     move_played: dict = {"cn": move_cn, "iccs": move_iccs}
     if win_before is not None:
         move_played["win_prob_before"] = round(win_before, 2)
@@ -386,6 +399,7 @@ def build_context(
         },
         "move_played": move_played,
         "engine_best": engine_best,
+        "purpose": purpose.text,
     }
     if opponent_reply:
         data["opponent_reply"] = opponent_reply
@@ -405,6 +419,7 @@ def build_context(
         win_after=win_after,
         best=best,
         reply=reply,
+        purpose=purpose.text,
         facts=facts,
         key_facts=key_facts,
         tags=tags,

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 from ..core import RED, Position, RuleConfig, game_result, parse_iccs
 from ..core.features import game_phase
-from ..engine import AnalysisResult, Limit, UciEngine
+from ..engine import AnalysisCache, AnalysisResult, Limit, UciEngine
 from ..llm import EngineLine, ExplainContext, build_context
 
 GRADES = ("妙着", "好棋", "可以", "缓着", "失误", "漏着")
@@ -102,11 +102,13 @@ async def analyse_positions(
     rules: RuleConfig,
     multipv: int = MULTIPV,
     progress: Callable[[int, int], None] | None = None,
+    cache: AnalysisCache | None = None,
 ) -> list[PositionEval]:
     """逐个局面（开局到终局，共 len(moves) + 1 个）请引擎分析。
 
     无子可走的局面、以及按规则已经结束的最后一个局面直接按结果计分，不调用引擎。
     中间局面即使按本项目的简化规则判了重复，对局实际还在继续，所以照常分析。
+    全局分析缓存（cache）命中时直接复用同一次搜索：强度不变，只是不重复花时间。
     """
     pos = Position.from_fen(initial_fen, validate=False)
     total = len(moves) + 1
@@ -116,7 +118,9 @@ async def analyse_positions(
             pos.push(parse_iccs(moves[ply - 1]))
         final = ply == total - 1
         evals.append(
-            await _evaluate(engine, initial_fen, moves[:ply], pos, limit, rules, multipv, final)
+            await _evaluate(
+                engine, initial_fen, moves[:ply], pos, limit, rules, multipv, final, cache
+            )
         )
         if progress is not None:
             progress(ply + 1, total)
@@ -131,12 +135,13 @@ async def evaluate_position(
     limit: Limit,
     rules: RuleConfig,
     multipv: int = MULTIPV,
+    cache: AnalysisCache | None = None,
 ) -> PositionEval:
     """进行中的对局里的一个局面（初始局面 + moves）：按规则已经结束就按结果计分，否则请引擎分析。"""
     pos = Position.from_fen(initial_fen, validate=False)
     for text in moves:
         pos.push(parse_iccs(text))
-    return await _evaluate(engine, initial_fen, moves, pos, limit, rules, multipv, True)
+    return await _evaluate(engine, initial_fen, moves, pos, limit, rules, multipv, True, cache)
 
 
 async def _evaluate(
@@ -148,6 +153,7 @@ async def _evaluate(
     rules: RuleConfig,
     multipv: int,
     final: bool,
+    cache: AnalysisCache | None = None,
 ) -> PositionEval:
     """final：对局停在这个局面（按规则已经结束的话就是终局）。"""
     ply = len(moves)
@@ -155,7 +161,13 @@ async def _evaluate(
     if result is not None:
         red = 0.5 if result.winner is None else (1.0 if result.winner == RED else 0.0)
         return PositionEval(ply, pos.turn, red, [], result.text)
-    analysis = await engine.analyse(initial_fen, moves, limit=limit, multipv=multipv)
+    analysis = None
+    if cache is not None:
+        analysis = cache.get(initial_fen, moves, multipv, limit.movetime_ms)
+    if analysis is None:
+        analysis = await engine.analyse(initial_fen, moves, limit=limit, multipv=multipv)
+        if cache is not None:
+            cache.put(initial_fen, moves, multipv, limit.movetime_ms, analysis)
     lines = lines_from(analysis)
     score = lines[0].score if lines else 0.5
     red = score if pos.turn == RED else 1.0 - score
@@ -330,10 +342,13 @@ async def review_game(
     limit: Limit,
     rules: RuleConfig,
     progress: Callable[[int, int], None] | None = None,
+    cache: AnalysisCache | None = None,
 ) -> tuple[list[PositionEval], list[MoveGrade], dict]:
     """整盘分析 + 每步评级 + 汇总（不含讲解）。"""
     fen, moves = record["initial_fen"], record["moves"]
-    evals = await analyse_positions(engine, fen, moves, limit=limit, rules=rules, progress=progress)
+    evals = await analyse_positions(
+        engine, fen, moves, limit=limit, rules=rules, progress=progress, cache=cache
+    )
     grades = grade_moves(fen, moves, evals)
     return evals, grades, summarize(grades, focus_sides(record))
 

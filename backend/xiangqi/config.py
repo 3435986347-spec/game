@@ -35,7 +35,8 @@ class AppConfig:
     library_db: Path | None = None
     library_index_plies: int = 40  # 局面索引只记录每局前多少步（半回合）
     llm: LLMConfig = field(default_factory=LLMConfig)
-    review_movetime_ms: int = 800  # 复盘时引擎分析每个局面的时间
+    # 复盘/每步分析时引擎分析每个局面的时间（不低于提示时间，避免推荐与评级不一致）
+    review_movetime_ms: int = 1500
 
 
 _DOTENV_COMMENT = re.compile(r"\s+#.*$")
@@ -130,12 +131,16 @@ def _engine_config(section: dict, base: Path) -> EngineConfig | None:
     if not section.get("path"):
         return None
     eval_file = section.get("eval_file")
+    threads = int(section.get("threads", 4))
+    if threads <= 0:  # 0 表示自动：用本机全部核心（最多 8 个，避免三个引擎实例同时运行时超载）
+        threads = min(os.cpu_count() or 4, 8)
     return EngineConfig(
         path=base / section["path"],
         args=tuple(str(a) for a in section.get("args", ())),
         flavor=section.get("flavor", "pikafish"),
         eval_file=(base / eval_file) if eval_file else None,
-        threads=int(section.get("threads", 2)),
-        hash_mb=int(section.get("hash_mb", 128)),
-        hint_movetime_ms=int(section.get("hint_movetime_ms", 1000)),
+        threads=threads,
+        hash_mb=int(section.get("hash_mb", 256)),
+        hint_movetime_ms=int(section.get("hint_movetime_ms", 1500)),
+        analysis_threads=int(section.get("analysis_threads", 0)),
     )

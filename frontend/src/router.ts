@@ -1,5 +1,6 @@
 // 极简 hash 路由：#/ 对弈，#/library 棋谱库（可带搜索条件），#/library/<id> 打谱，
-// #/train 训练（#/train/review 复习错题，#/train/puzzle 做题），#/guess/<id> 猜着练习。
+// #/train 训练（#/train/review 复习错题，#/train/puzzle 做题），#/guess/<id> 猜着练习，
+// #/traps 飞刀开局。
 import { useEffect, useState } from "react";
 
 export type TrainMode = "home" | "review" | "puzzle";
@@ -9,7 +10,8 @@ export type Route =
   | { page: "library"; query: string }
   | { page: "game"; id: number; ply: number | null }
   | { page: "train"; mode: TrainMode; theme: string | null }
-  | { page: "guess"; id: number };
+  | { page: "guess"; id: number }
+  | { page: "traps" };
 
 export function parseRoute(hash: string): Route {
   const raw = hash.replace(/^#\/?/, "");
@@ -17,6 +19,7 @@ export function parseRoute(hash: string): Route {
   const path = q < 0 ? raw : raw.slice(0, q);
   const query = q < 0 ? "" : raw.slice(q + 1);
   const parts = path.split("/").filter(Boolean);
+  if (parts[0] === "traps") return { page: "traps" };
   if (parts[0] === "train") {
     const mode = parts[1] === "review" || parts[1] === "puzzle" ? parts[1] : "home";
     return { page: "train", mode, theme: new URLSearchParams(query).get("theme") };

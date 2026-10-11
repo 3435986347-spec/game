@@ -41,6 +41,8 @@ export interface GameView {
   position: PositionView;
   /** 已保存到棋谱库时为棋谱编号 */
   library_id: number | null;
+  /** 本局使用的飞刀开局名（没有为 null） */
+  book_name: string | null;
 }
 
 export interface NewGameOptions {
@@ -48,11 +50,28 @@ export interface NewGameOptions {
   /** 从 fen（或标准开局）开始先走这些着法（ICCS），用于从棋谱中的某一步开始 */
   moves?: string[];
   mode: Mode;
-  user_side: Side;
+  user_side?: Side;
   ai_level: number;
+  /** 飞刀开局 id；vs_ai 时 AI 按剧本走（默认执刀方，你破解） */
+  trap_id?: string | null;
+  /** 人机对战 + 飞刀时 AI 的角色：trap = AI 执刀方；victim = AI 按受害方剧本走（你练飞刀） */
+  ai_plays?: "trap" | "victim";
 }
 
 export type HintLevel = 1 | 2 | 3;
+
+export interface TrapNote {
+  id: string;
+  name: string;
+  note: string;
+}
+
+export interface TrapAlert {
+  kind: "suggest" | "warn";
+  id: string;
+  name: string;
+  advice: string;
+}
 
 export interface HintView {
   level: HintLevel;
@@ -63,6 +82,12 @@ export interface HintView {
   pv_cn: string[] | null;
   /** 走完推荐着法后红方的期望得分 0..1 */
   red_win: number | null;
+  /** 为什么这么走（仅 3 级提示） */
+  purpose: string | null;
+  /** 推荐着法属于某条飞刀剧本（或通用弃子飞刀）时的标注 */
+  trap: TrapNote | null;
+  /** 当前局面疑似飞刀时的告警/推荐 */
+  alert: TrapAlert | null;
   text: string;
 }
 
@@ -89,6 +114,10 @@ export interface AnalysisLine {
   score_cp: number | null;
   mate: number | null;
   depth: number;
+  /** 这步棋的目的（为什么这么走） */
+  purpose: string;
+  /** 命中飞刀剧本或属于通用弃子飞刀时的标注 */
+  trap: TrapNote | null;
 }
 
 export interface AnalysisInfo {
@@ -98,7 +127,46 @@ export interface AnalysisInfo {
   ply: number;
   fen: string;
   depth: number;
+  /** 当前局面疑似飞刀时的告警/推荐 */
+  trap_alert: TrapAlert | null;
+  /** 本条来自缓存里的更深结果（前端忽略比它浅的实时更新，直到实时超过它） */
+  seeded?: boolean;
   lines: AnalysisLine[];
+}
+
+// ---------- 飞刀开局 ----------
+
+export interface TrapSummary {
+  id: string;
+  name: string;
+  /** 执刀方 */
+  side: Side;
+  intro: string;
+  ply_count: number;
+  trap_ply: number;
+}
+
+export interface TrapMove {
+  ply: number;
+  cn: string;
+  iccs: string;
+  fen: string;
+  note: string | null;
+}
+
+export interface TrapDetail {
+  id: string;
+  name: string;
+  side: Side;
+  intro: string;
+  principle: string;
+  trap_ply: number;
+  /** 陷阱点局面（走完弃子着法之后，轮到受害者走） */
+  trap_fen: string;
+  /** 陷阱着法之前的局面（执刀方走弃子那步前） */
+  start_fen: string;
+  moves: TrapMove[];
+  refute: TrapMove[];
 }
 
 // ---------- 棋谱库 ----------
@@ -568,6 +636,8 @@ export const api = {
       body: JSON.stringify({ level }),
     }),
   engineStatus: () => request<EngineStatus>("/api/engine"),
+  listTraps: () => request<TrapSummary[]>("/api/traps"),
+  trapDetail: (id: string) => request<TrapDetail>(`/api/traps/${id}`),
   saveGame: (id: string) =>
     request<{ library_id: number }>(`/api/games/${id}/save`, { method: "POST" }),
 

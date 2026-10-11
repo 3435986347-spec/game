@@ -92,6 +92,47 @@ def test_template_uses_only_allowed_moves():
     assert expl.principle.startswith("走子前先看落点")
 
 
+def test_context_includes_purpose():
+    """上下文带「这步棋想干什么」的一句话概括，供模板和大模型使用。"""
+    ctx = blunder_context()
+    assert ctx.purpose and ctx.purpose == ctx.data["purpose"]
+    assert "吃掉" in ctx.purpose or "将军" in ctx.purpose  # 炮吃中卒
+
+
+def test_template_is_concise_and_humanized():
+    """模板讲解：标题和原因不带坐标、控制在两三句以内、以目的为主线。"""
+    ctx = blunder_context()
+    expl = template_explanation(ctx)
+    for field in (expl.headline, expl.why, expl.better):
+        assert "(e6)" not in field and "(g7)" not in field and "(h9)" not in field
+    assert len(expl.headline) <= 40
+    assert len(expl.why) <= 90
+    assert "期望得分从54%降到16%" in expl.why
+    assert "黑方的最佳应着是" not in expl.why  # 不再和「对方最好应以」重复
+
+
+def test_template_good_move_leads_with_purpose():
+    """好棋的讲解以「目的」为主：标题直接说这步做成了什么。"""
+    pos = play(Position.start(), "h2e2", "h9g7")
+    ctx = build_context(
+        pos,
+        parse_iccs("h0g2"),
+        before=[
+            EngineLine("h0g2", ("h0g2", "i9h9", "i0h0"), 0.55),
+            EngineLine("b0c2", ("b0c2",), 0.53),
+        ],
+        after=[EngineLine("i9h9", ("i9h9", "i0h0"), 0.45)],
+        win_before=0.55,
+        win_after=0.55,
+        grade="好棋",
+        level="入门",
+    )
+    expl = template_explanation(ctx)
+    assert expl.headline == "马二进三是好棋：出动大子，抢占要点。"
+    assert "期望得分" not in expl.why  # 分数没变化时不重复数字
+    assert unknown_moves(expl, ctx.allowed_keys) == []
+
+
 # ---- 校验 ----
 
 

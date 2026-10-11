@@ -372,6 +372,20 @@ def test_service_sets_eval_file_found_in_parent(tmp_path):
     binary.parent.mkdir(parents=True)
     binary.write_text("")
     (tmp_path / "Pikafish" / "pikafish.nnue").write_text("")
-    engine = EngineService(EngineConfig(path=binary))._create()
+    engine = EngineService(EngineConfig(path=binary))._create("player")
     assert engine.options["EvalFile"] == str(tmp_path / "Pikafish" / "pikafish.nnue")
     assert Path(engine.command[0]).is_absolute()
+
+
+def test_engine_config_threads_per_role():
+    from pathlib import Path
+
+    from xiangqi.engine.service import EngineConfig
+
+    cfg = EngineConfig(Path("pikafish"), threads=4)
+    assert cfg.threads_for("player") == 4
+    assert cfg.threads_for("reviewer") == 4
+    assert cfg.threads_for("analyser") == 4  # 默认与 threads 相同
+    cfg2 = EngineConfig(Path("pikafish"), threads=4, analysis_threads=6)
+    assert cfg2.threads_for("analyser") == 6  # 显式调大才生效
+    assert cfg2.threads_for("player") == 4

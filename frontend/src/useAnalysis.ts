@@ -31,6 +31,9 @@ export function useAnalysis(
   const failures = useRef(0); // 连续失败次数，决定重连等待时间
   const fenRef = useRef(fen);
   fenRef.current = fen;
+  // 收到过「缓存里的更深结果」（seeded）后，忽略比它浅的实时更新，直到实时超过它。
+  // 换局面时必须清零（在 start 发送时做），否则新局面的浅层结果会被旧门槛吞掉。
+  const seededDepth = useRef(0);
 
   useEffect(() => {
     if (!enabled) return;
@@ -46,8 +49,16 @@ export function useAnalysis(
     ws.onmessage = (event) => {
       const message = JSON.parse(event.data);
       if (message.type === "info" && sameFen(message.fen, fenRef.current)) {
-        setInfo(message);
-        setError(null);
+        if (message.seeded) {
+          // 缓存结果先顶上：立刻有内容，但实时搜索没超过这个深度前不再更新
+          seededDepth.current = Math.max(seededDepth.current, message.depth);
+          setInfo(message);
+          setError(null);
+        } else if (message.depth > seededDepth.current) {
+          seededDepth.current = 0; // 实时搜索超过了缓存深度，恢复逐次更新
+          setInfo(message);
+          setError(null);
+        }
       } else if (message.type === "error") {
         setError(message.message);
       }
@@ -79,6 +90,7 @@ export function useAnalysis(
 
   useEffect(() => {
     if (!socket || !start) return;
+    seededDepth.current = 0; // 换了局面：旧局面的缓存深度门槛作废，新局面的实时结果照常显示
     socket.send(finished ? JSON.stringify({ type: "stop" }) : start);
   }, [socket, start, fen, finished]);
 

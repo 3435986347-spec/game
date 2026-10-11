@@ -15,17 +15,22 @@ index_plies = 40               # 局面索引只记录每局前多少步（半�
 
 # 象棋引擎：安装方法见 README「安装象棋引擎」。可以用 cd backend && uv run xiangqi-engine-check ../engines/Pikafish
 # 自动挑选能在本机运行的最快版本，并打印要填写的内容。去掉下面几行开头的 # 即可启用。
-# [engine]
-# path = "engines/Pikafish/Pikafish-MacOS-universal"   # 引擎可执行文件（Windows 为 .exe）
+[engine]
+path = "engines/Pikafish/Pikafish-MacOS-universal"   # 引擎可执行文件（Windows 为 .exe）
 # flavor = "pikafish"          # pikafish | fairy-stockfish
 # eval_file = ""               # pikafish.nnue 的路径；留空则在引擎所在目录及上两级目录中查找
-# threads = 2                  # 每个引擎实例的线程数（对局和分析各一个实例）
-# hash_mb = 128
-# hint_movetime_ms = 1000      # 提示时引擎思考多久（毫秒）
+# threads = 4                  # 每个引擎实例的线程数（对局和分析各一个实例）。0 表示自动（最多 8）；
+#                              # 线程越多同一时间内搜索越深、棋力越强（8 核 Mac 实测 4 线程约 570 万 nps）
+# analysis_threads = 0         # 实时分析引擎的线程数；0 = 与 threads 相同。想单独加线程先实测：
+#                              # 苹果 M 系（性能核+能效核）加线程反而更慢（8 核 M3 实测 4 线程最快）
+# hash_mb = 256                # 置换表大小，越大记住的局面越多
+# hint_movetime_ms = 1500      # 提示时引擎思考多久（毫秒）；越久提示和胜率越准
 
-# 复盘：引擎分析每个局面的时间（毫秒）。越长越准，复盘也越慢（100 步的棋约 80 秒）
+# 复盘：引擎分析每个局面的时间（毫秒）。越长越准，复盘也越慢（100 步的棋约 150 秒）。
+# 建议和 [engine] 的 hint_movetime_ms 保持一致或更长：评级搜索比提示搜索浅时，
+# 提示推荐的着法可能被评级误判成失误。
 [review]
-movetime_ms = 800
+movetime_ms = 1500
 
 # 大模型讲解（复盘的关键时刻、打谱时的「讲解这步」）。不配置也能用：会退回模板讲解，只是没那么自然。
 # API Key 不要写在这里：写在仓库根目录的 .env 文件里（不会提交到仓库），或系统环境变量里。

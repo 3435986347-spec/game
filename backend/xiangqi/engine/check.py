@@ -210,6 +210,9 @@ def _print_config_hint(
         print(f'flavor = "{flavor}"')
     if eval_file is not None:
         print(f"eval_file = {toml_path(eval_file, config_file)}")
+    print("\n# 棋力相关（可选，默认 threads=4、hash_mb=256）：")
+    print("# threads = 0    # 0 表示自动用全部核心（最多 8）；线程越多同时搜索越深")
+    print("# hash_mb = 256  # 置换表大小，越大记住的局面越多")
 
 
 if __name__ == "__main__":

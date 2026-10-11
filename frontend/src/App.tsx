@@ -6,8 +6,9 @@ import LibraryPage from "./LibraryPage";
 import PlayPage from "./PlayPage";
 import { useRoute } from "./router";
 import TrainPage from "./TrainPage";
+import TrapsPage from "./TrapsPage";
 
-const TITLES = { play: "对弈", library: "棋谱库", game: "打谱", train: "训练", guess: "猜着练习" };
+const TITLES = { play: "对弈", library: "棋谱库", game: "打谱", train: "训练", guess: "猜着练习", traps: "飞刀开局" };
 
 /** 页面外壳：顶部导航 + 按地址栏 hash 显示对弈、棋谱库、打谱、训练或猜着练习页面。 */
 export default function App() {
@@ -38,6 +39,9 @@ export default function App() {
         <h1>象棋自学</h1>
         <nav className="tabs">
           <a href="#/" className={route.page === "play" ? "active" : undefined}>对弈</a>
+          <a href="#/traps" className={route.page === "traps" ? "active" : undefined}>
+            飞刀开局
+          </a>
           <a href="#/library" className={route.page === "library" || route.page === "game" ? "active" : undefined}>
             棋谱库
           </a>
@@ -48,6 +52,7 @@ export default function App() {
       </header>
 
       {route.page === "play" && <PlayPage />}
+      {route.page === "traps" && <TrapsPage />}
       {route.page === "library" && <LibraryPage query={route.query} />}
       {route.page === "game" && <GameViewer key={route.id} id={route.id} initialPly={route.ply} />}
       {route.page === "train" && <TrainPage key={`${route.mode}-${route.theme}`} mode={route.mode} theme={route.theme} />}

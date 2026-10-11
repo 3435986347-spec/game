@@ -2,6 +2,7 @@
 
 from .board import BLACK, RED, Move
 from .fen import START_FEN, FenError, format_fen, parse_fen, validate_board
+from .intent import Purpose, purpose_of_move
 from .movegen import in_check, is_legal_move, legal_moves, perft, pseudo_legal_moves
 from .notation import (
     NotationError,
@@ -25,6 +26,7 @@ __all__ = [
     "Move",
     "NotationError",
     "Position",
+    "Purpose",
     "RuleConfig",
     "chinese_variants",
     "format_fen",
@@ -40,5 +42,6 @@ __all__ = [
     "parse_move",
     "perft",
     "pseudo_legal_moves",
+    "purpose_of_move",
     "validate_board",
 ]

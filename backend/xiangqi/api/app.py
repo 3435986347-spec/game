@@ -8,11 +8,12 @@ from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
 from ..config import AppConfig
-from ..engine import EngineService
+from ..engine import AnalysisCache, EngineService
 from ..library import Library
 from ..llm import ExplainService
+from ..openings import build_trap_index
 from ..training import TrainingStore
-from . import analysis, annotate, coach, games, guess, review, train
+from . import analysis, annotate, coach, games, guess, review, train, traps
 from . import library as library_api
 
 _NOT_BUILT_HTML = """<!doctype html><meta charset="utf-8"><title>象棋自学</title>
@@ -53,6 +54,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.explainer = ExplainService(config.llm, cache=library)
     app.state.training = TrainingStore(library)
     app.state.guess_locks = {}  # 猜着练习：同一次练习的作答依次处理
+    app.state.trap_index = build_trap_index()  # 飞刀剧本的局面索引（不可变，只读）
+    # 全局引擎分析缓存：同样的局面 + 同样的搜索参数直接复用（强度不变，只是不重复算）
+    app.state.analysis_cache = AnalysisCache()
     app.include_router(games.router)
     app.include_router(analysis.router)
     app.include_router(library_api.router)
@@ -61,6 +65,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(coach.router)
     app.include_router(guess.router)
     app.include_router(train.router)
+    app.include_router(traps.router)
 
     @app.get("/api/health", tags=["系统"])
     def health() -> dict[str, str]:

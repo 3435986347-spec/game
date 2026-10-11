@@ -1,5 +1,6 @@
-"""象棋引擎接入：UCI 协议适配、难度控制、引擎服务。"""
+"""象棋引擎接入：UCI 协议适配、难度控制、引擎服务、分析缓存。"""
 
+from .cache import AnalysisCache
 from .difficulty import LEVELS, MAX_LEVEL, MIN_LEVEL, Level, choose_move, get_level
 from .service import EngineConfig, EngineService, EngineUnavailable
 from .uci import AnalysisResult, EngineError, InfoLine, Limit, UciEngine
@@ -8,6 +9,7 @@ __all__ = [
     "LEVELS",
     "MAX_LEVEL",
     "MIN_LEVEL",
+    "AnalysisCache",
     "AnalysisResult",
     "EngineConfig",
     "EngineError",

@@ -2,6 +2,7 @@
 
 from .collect import collect_from_review
 from .hints import direction_hint
+from .intent import Purpose, purpose_of_move
 from .judge import Judgement, close_enough, judge_moves
 from .review import (
     BAD_GRADES,
@@ -30,6 +31,7 @@ __all__ = [
     "Judgement",
     "MoveGrade",
     "PositionEval",
+    "Purpose",
     "TrainingStore",
     "analyse_positions",
     "close_enough",
@@ -45,6 +47,7 @@ __all__ = [
     "move_accuracy",
     "move_context",
     "position_after",
+    "purpose_of_move",
     "review_game",
     "review_rows",
     "summarize",

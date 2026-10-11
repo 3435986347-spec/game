@@ -1577,3 +1577,155 @@ button.chip {
 .move-card button.link {
   padding: 0;
 }
+
+/* ---------- 飞刀标注与告警 ---------- */
+
+.trap-chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.trap-chip.generic {
+  border-color: var(--analysis);
+  color: var(--analysis);
+}
+
+.trap-alert {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 8px 10px;
+  margin: 8px 0;
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.trap-alert.warn {
+  background: var(--error-bg);
+  color: var(--error-text);
+}
+
+.trap-alert.suggest {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
+.analysis-purpose {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.card.hint .hint-trap {
+  margin-top: 8px;
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.trap-banner {
+  margin-bottom: 10px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px dashed var(--accent);
+  color: var(--accent);
+  font-size: 14px;
+}
+
+/* ---------- 新对局：飞刀选择 ---------- */
+
+.trap-select {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 14px;
+  margin: 10px 0;
+}
+
+.trap-select select {
+  font-size: 14px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+}
+
+/* ---------- 飞刀开局页 ---------- */
+
+.traps-page {
+  max-width: 900px;
+}
+
+.trap-cards {
+  display: grid;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.trap-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 8px;
+}
+
+.side-tag {
+  font-size: 12px;
+  font-weight: normal;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.side-tag.red {
+  color: var(--red-piece);
+  border-color: var(--red-piece);
+}
+
+.side-tag.black {
+  color: var(--black-piece);
+  border-color: var(--black-piece);
+}
+
+.trap-replay {
+  display: grid;
+  grid-template-columns: minmax(320px, 460px) 1fr;
+  gap: 16px;
+  align-items: start;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.trap-replay-board .board-canvas {
+  max-width: 100%;
+}
+
+.replay-controls {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.trap-replay-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.trap-replay-notes p {
+  margin: 0;
+  line-height: 1.6;
+}

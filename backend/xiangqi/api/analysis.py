@@ -22,15 +22,26 @@ from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
 from ..core import RED, FenError, NotationError, Position, parse_iccs
 from ..core.variation import pv_to_chinese
-from ..engine import LEVELS, EngineError, EngineService, EngineUnavailable, InfoLine
+from ..engine import (
+    LEVELS,
+    AnalysisCache,
+    AnalysisResult,
+    EngineError,
+    EngineService,
+    EngineUnavailable,
+    InfoLine,
+)
+from ..openings import match_move, move_note, trap_advice
+from ..openings.index import match_position
+from ..training import purpose_of_move
 from .games import Game, red_expected
 from .schemas import EngineStatusView, LevelView
 
 router = APIRouter(tags=["引擎"])
 logger = logging.getLogger(__name__)
 
-_MIN_INTERVAL = 0.25  # 两次推送的最小间隔（秒）
-_MAX_STALE = 1.0  # 候选着法迟迟凑不齐同一深度时，最多隔这么久也推送一次
+_MIN_INTERVAL = 0.25  # 深度提升后至少隔这么久推送一次
+_MAX_STALE = 2.0  # 同一深度内分数细化（窗口重搜）最多隔这么久也推送一次
 
 
 @router.get("/api/engine", response_model=EngineStatusView)
@@ -59,7 +70,16 @@ async def analysis_socket(ws: WebSocket) -> None:
                     continue
                 multipv = max(1, min(int(message.get("multipv", 3)), 5))
                 await _preempt_other(app, ws)
-                task = asyncio.create_task(_stream(ws, app.state.engines, target, multipv))
+                task = asyncio.create_task(
+                    _stream(
+                        ws,
+                        app.state.engines,
+                        target,
+                        multipv,
+                        app.state.trap_index,
+                        app.state.analysis_cache,
+                    )
+                )
                 app.state.analysis_task, app.state.analysis_socket = task, ws
             elif kind == "stop":
                 await ws.send_json({"type": "stopped"})
@@ -124,24 +144,60 @@ def _target(app, message: dict) -> _Target:
     return _Target(None, Position.from_fen(fen).fen(), [str(m) for m in moves], position)
 
 
-async def _stream(ws: WebSocket, engines: EngineService, target: _Target, multipv: int) -> None:
+async def _stream(
+    ws: WebSocket,
+    engines: EngineService,
+    target: _Target,
+    multipv: int,
+    trap_index: dict,
+    cache: AnalysisCache,
+) -> None:
     initial_fen, moves, position = target.initial_fen, target.moves, target.position
     ply = len(moves)
     if not position.legal_moves():  # 将死或困毙：没有可分析的着法，直接告诉前端
-        await ws.send_json(_info_message(target.game_id, ply, position, []))
+        await ws.send_json(
+            await _info_message(target.game_id, ply, position, [], trap_index, seeded=False)
+        )
         return
+    # 这个局面之前分析过（悔棋走回来、反复研究同一个开局）：先把缓存里的更深结果发出去，
+    # 面板立刻有内容；随后的实时搜索更深后自然接替（seeded 标记让前端忽略比缓存浅的更新）。
+    seeded = cache.get(initial_fen, moves, multipv, None)
+    if seeded is not None and seeded.lines and seeded.lines[0].depth >= 8:
+        await ws.send_json(
+            await _info_message(
+                target.game_id, ply, position, seeded.lines, trap_index, seeded=True
+            )
+        )
     try:
         engine = await engines.analyser()
         loop = asyncio.get_running_loop()
         last_sent = 0.0
+        last_depth = -1
         async with aclosing(engine.analyse_infinite(initial_fen, moves, multipv=multipv)) as gen:
             async for lines in gen:
-                # 引擎逐条输出同一深度的各个候选；凑齐（深度一致）再推送，避免显示新旧混杂的结果
-                complete = all(line.depth == lines[0].depth for line in lines)
+                if not lines:
+                    continue
+                # 最佳着法（multipv 1）一算到更深就推送，不等第 2、3 名凑齐同一深度——
+                # 「下一步走法」永远显示引擎已经算到的最新结果；第 2、3 名稍后自己跟上来。
+                # 同一深度内的窗口重搜最多每 _MAX_STALE 秒推一次。
+                depth = lines[0].depth
                 elapsed = loop.time() - last_sent
-                if (complete and elapsed >= _MIN_INTERVAL) or elapsed >= _MAX_STALE:
+                if (depth > last_depth and elapsed >= _MIN_INTERVAL) or elapsed >= _MAX_STALE:
                     last_sent = loop.time()
-                    await ws.send_json(_info_message(target.game_id, ply, position, lines))
+                    if depth > last_depth:
+                        last_depth = depth
+                    cache.put(
+                        initial_fen,
+                        moves,
+                        multipv,
+                        None,
+                        AnalysisResult(lines=list(lines), bestmove=None),
+                    )
+                    await ws.send_json(
+                        await _info_message(
+                            target.game_id, ply, position, lines, trap_index, seeded=False
+                        )
+                    )
     except (EngineUnavailable, EngineError) as e:
         await _send_error(ws, str(e))
     except WebSocketDisconnect:
@@ -156,10 +212,61 @@ async def _send_error(ws: WebSocket, message: str) -> None:
         await ws.send_json({"type": "error", "message": message})
 
 
-def _info_message(game_id: str | None, ply: int, position: Position, lines: list[InfoLine]) -> dict:
-    sign = 1 if position.turn == RED else -1
-    out = []
+def _line_extras(
+    position: Position, lines: list[InfoLine], trap_index: dict
+) -> tuple[list[tuple[str, dict | None]], dict | None]:
+    """在后台线程里算：每条候选着法的目的与飞刀标注，以及当前局面的飞刀告警。
+
+    飞刀标注有两类：
+    1. 命中飞刀剧本：候选着法走后落在某条飞刀剧本的局面 → 标注剧本名（开局、中局任何步都查）；
+    2. 通用飞刀（随机应变）：候选着法按主要变化弃了子、但期望得分不低于最佳着法 →
+       标「飞刀：弃子抢攻」并附目的。任何局面都可能出现，不限于开局。
+    """
+    per_line: list[tuple[str, dict | None]] = []
+    best_score = lines[0].expected_score() if lines else None
     for line in lines:
+        try:
+            purpose = purpose_of_move(
+                position,
+                line.move,
+                pv=list(line.pv)[1:4],
+                score_before=best_score,
+                score_after=line.expected_score(),
+                deep=False,
+            )
+            trap: dict | None = None
+            match = match_move(trap_index, position, line.move)
+            if match is not None:
+                trap = {"id": match.trap.id, "name": match.trap.name, "note": move_note(match)}
+            elif purpose.sacrifice:
+                trap = {"id": "sacrifice", "name": "飞刀", "note": f"弃子抢攻：{purpose.text}"}
+            per_line.append((purpose.text, trap))
+        except Exception:  # 防御：单条候选着法异常（引擎着法生僻等）不能中断整个实时分析
+            per_line.append(("", None))
+    alert = None
+    try:
+        advice = trap_advice(position, match_position(trap_index, position))
+        if advice is not None:
+            alert = {
+                "kind": advice.kind, "id": advice.id, "name": advice.name, "advice": advice.advice
+            }
+    except Exception:  # 同样防御：告警计算失败只影响告警，不影响候选着法
+        alert = None
+    return per_line, alert
+
+
+async def _info_message(
+    game_id: str | None,
+    ply: int,
+    position: Position,
+    lines: list[InfoLine],
+    trap_index: dict,
+    seeded: bool = False,
+) -> dict:
+    sign = 1 if position.turn == RED else -1
+    extras, alert = await asyncio.to_thread(_line_extras, position, lines, trap_index)
+    out = []
+    for line, (purpose_text, trap) in zip(lines, extras, strict=True):
         pv_cn = pv_to_chinese(position, line.pv, limit=10)
         out.append(
             {
@@ -170,13 +277,19 @@ def _info_message(game_id: str | None, ply: int, position: Position, lines: list
                 "score_cp": None if line.score_cp is None else sign * line.score_cp,
                 "mate": None if line.mate is None else sign * line.mate,
                 "depth": line.depth,
+                "purpose": purpose_text,
+                "trap": trap,
             }
         )
-    return {
+    message: dict = {
         "type": "info",
         "game_id": game_id,
         "ply": ply,
         "fen": position.fen(),
         "depth": lines[0].depth if lines else 0,
+        "trap_alert": alert,
         "lines": out,
     }
+    if seeded:
+        message["seeded"] = True  # 来自缓存的更深结果：前端忽略比它浅的实时更新，直到实时超过它
+    return message

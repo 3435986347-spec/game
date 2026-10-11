@@ -205,4 +205,5 @@ def test_explain_mate_in_one_uses_result(client):
     )  # fmt: skip
     pid = client.get("/api/train/puzzle").json()["puzzle"]["id"]
     explanation = client.post(f"/api/train/puzzles/{pid}/explain").json()
-    assert "走完后约100%" in explanation["why"]  # 走完就将死：按结果计分
+    assert "升到100%" in explanation["why"]  # 走完就将死：按结果计分
+    assert "将死对方" in explanation["headline"]  # 正解讲解以目的为主线

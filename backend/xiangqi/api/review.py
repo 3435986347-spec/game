@@ -101,6 +101,7 @@ async def _run_review(app, job: ReviewJob, record: dict) -> None:
             limit=Limit(movetime_ms=config.review_movetime_ms),
             rules=config.rules,
             progress=on_progress,
+            cache=app.state.analysis_cache,
         )
 
         job.phase, job.progress, job.total = "explaining", 0, len(summary["key_moments"])

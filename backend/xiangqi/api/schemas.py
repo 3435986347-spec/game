@@ -43,6 +43,7 @@ class GameView(BaseModel):
     ai_to_move: bool = Field(description="人机对战中现在是否轮到 AI 走")
     hints_used: int
     library_id: int | None = Field(default=None, description="已保存到棋谱库时的 id")
+    book_name: str | None = Field(default=None, description="本局使用的飞刀开局名（没有为 null）")
     moves: list[MoveRecord]
     position: PositionView
 
@@ -51,11 +52,20 @@ class NewGameRequest(BaseModel):
     fen: str | None = Field(default=None, description="起始局面，不填为标准开局")
     moves: list[str] = Field(
         default_factory=list,
-        description="从起始局面开始先走的着法（ICCS），用于从棋谱中的某一步开始",
+        description="从起始局面开始先走的着法（ICCS），用于从棋谱中的某一步开始；"
+        "指定 trap_id 时忽略本字段（飞刀剧本自己决定开局）",
     )
     mode: Mode = "free"
     user_side: Side = "red"
     ai_level: int = Field(default=3, ge=1, le=10)
+    trap_id: str | None = Field(
+        default=None, description="飞刀开局 id（见 /api/traps）；指定时 fen、moves 被忽略"
+    )
+    ai_plays: Literal["trap", "victim"] | None = Field(
+        default=None,
+        description="人机对战 + 飞刀时 AI 的角色：trap = AI 执刀方（你破解），victim = AI 按"
+        "受害方剧本走（你练飞刀）。默认 trap",
+    )
 
 
 class MoveRequest(BaseModel):
@@ -68,6 +78,23 @@ class HintRequest(BaseModel):
     )
 
 
+class TrapNoteView(BaseModel):
+    """候选着法命中飞刀剧本时的标注。"""
+
+    id: str
+    name: str
+    note: str
+
+
+class TrapAlertView(BaseModel):
+    """当前局面疑似飞刀时的告警/推荐。"""
+
+    kind: Literal["suggest", "warn"]
+    id: str
+    name: str
+    advice: str
+
+
 class HintView(BaseModel):
     level: int
     from_square: str | None = Field(
@@ -77,7 +104,43 @@ class HintView(BaseModel):
     cn: str | None = None
     pv_cn: list[str] | None = Field(default=None, description="主要变化（仅 3 级提示）")
     red_win: float | None = Field(default=None, description="走完推荐着法后红方期望得分 0..1")
+    purpose: str | None = Field(default=None, description="为什么这么走（仅 3 级提示）")
+    trap: TrapNoteView | None = Field(default=None, description="推荐着法属于某条飞刀剧本时的标注")
+    alert: TrapAlertView | None = Field(default=None, description="当前局面疑似飞刀时的告警/推荐")
     text: str
+
+
+# ---- 飞刀开局 ----
+
+
+class TrapSummaryView(BaseModel):
+    id: str
+    name: str
+    side: Side = Field(description="执刀方")
+    intro: str
+    ply_count: int
+    trap_ply: int
+
+
+class TrapMoveView(BaseModel):
+    ply: int = Field(description="步数（破解变的步数从陷阱点接着数）")
+    cn: str
+    iccs: str
+    fen: str = Field(description="走完这步之后的局面")
+    note: str | None = Field(default=None, description="这步的讲解")
+
+
+class TrapDetailView(BaseModel):
+    id: str
+    name: str
+    side: Side
+    intro: str
+    principle: str
+    trap_ply: int
+    trap_fen: str = Field(description="陷阱点局面（走完弃子着法之后，轮到受害者走）")
+    start_fen: str = Field(description="陷阱着法之前的局面（执刀方走弃子那步前）")
+    moves: list[TrapMoveView] = Field(description="主变剧本（受害者落入陷阱）")
+    refute: list[TrapMoveView] = Field(description="破解变（从陷阱点开始的正解续着）")
 
 
 class LevelView(BaseModel):

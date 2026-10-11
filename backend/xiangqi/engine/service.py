@@ -21,13 +21,24 @@ class EngineConfig:
     args: tuple[str, ...] = ()  # 额外的命令行参数（一般不需要）
     flavor: str = "pikafish"
     eval_file: Path | None = None
-    threads: int = 2
-    hash_mb: int = 128
-    hint_movetime_ms: int = 1000
+    threads: int = 4
+    hash_mb: int = 256
+    hint_movetime_ms: int = 1500
+    # 实时分析引擎的线程数；0 表示和 threads 一样。想给实时分析单独加线程（如均匀核心的
+    # 台式机）可以在这里调大——注意：苹果 M 系（性能核+能效核）加线程反而更慢
+    # （实测 8 核 M3 上 4 线程达到同样深度最快），先实测再调。
+    analysis_threads: int = 0
 
     def __post_init__(self) -> None:
         if self.flavor not in FLAVORS:
             raise ValueError(f"[engine] flavor 应为 {' 或 '.join(FLAVORS)}，实际为 {self.flavor!r}")
+
+    def threads_for(self, role: str) -> int:
+        """各引擎实例的线程数：实时分析用 analysis_threads（0 = 同 threads），
+        对局/复盘用 threads。"""
+        if role == "analyser" and self.analysis_threads > 0:
+            return self.analysis_threads
+        return self.threads
 
 
 class EngineUnavailable(RuntimeError):
@@ -88,7 +99,7 @@ class EngineService:
                 return engine
             if engine is not None:
                 await engine.close()
-            engine = self._create()
+            engine = self._create(role)
             try:
                 await engine.start()  # 失败或被取消时 start() 会结束进程
             except (EngineError, TimeoutError) as e:
@@ -98,14 +109,17 @@ class EngineService:
             self.last_error = None
             return engine
 
-    def _create(self) -> UciEngine:
+    def _create(self, role: str) -> UciEngine:
         cfg = self.config
         assert cfg is not None
         if not cfg.path.exists() and not cfg.path.with_suffix(".exe").exists():
             raise EngineUnavailable(
                 f"找不到引擎文件：{cfg.path}。请检查 config.toml 中 [engine] 的 path。"
             )
-        options: dict[str, str | int | bool] = {"Threads": cfg.threads, "Hash": cfg.hash_mb}
+        options: dict[str, str | int | bool] = {
+            "Threads": cfg.threads_for(role),
+            "Hash": cfg.hash_mb,
+        }
         eval_file = cfg.eval_file
         if eval_file is None and cfg.flavor == "pikafish":
             eval_file = find_network(cfg.path)  # 权重文件常在上一级目录

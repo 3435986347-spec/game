@@ -203,6 +203,7 @@ def test_hint_and_analysis_use_red_perspective(client):
 
 
 def test_level2_then_level3_hint_searches_once(client, monkeypatch):
+    """提示搜索按历史缓存：2 级只搜局面；3 级复用局面搜索，再补一次「对方最佳应着」的搜索。"""
     from xiangqi.engine import UciEngine
 
     calls = []
@@ -216,7 +217,46 @@ def test_level2_then_level3_hint_searches_once(client, monkeypatch):
     gid = client.post("/api/games", json={}).json()["id"]
     post(client, f"/api/games/{gid}/hint", level=2)
     post(client, f"/api/games/{gid}/hint", level=3)
-    assert len(calls) == 1
+    assert len(calls) == 2  # 局面搜索 + 应着搜索
+    post(client, f"/api/games/{gid}/hint", level=3)
+    assert len(calls) == 2  # 同一历史、同一局面：两次都命中缓存
     post(client, f"/api/games/{gid}/moves", move="h2e2")
     post(client, f"/api/games/{gid}/hint", level=2)
-    assert len(calls) == 2  # 局面变了，重新搜索
+    assert len(calls) == 3  # 局面变了，重新搜索
+
+
+def test_hint_reuses_global_cache_across_games(client, monkeypatch):
+    """同样的局面（如都从初始局面要提示）跨对局复用全局分析缓存：不再重复搜索。"""
+    from xiangqi.engine import UciEngine
+
+    calls = []
+    original = UciEngine.analyse
+
+    async def counting(self, *args, **kwargs):
+        calls.append(args)
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(UciEngine, "analyse", counting)
+    gid1 = client.post("/api/games", json={}).json()["id"]
+    h1 = client.post(f"/api/games/{gid1}/hint", json={"level": 3}).json()
+    assert len(calls) == 2  # 局面搜索 + 应着搜索
+    gid2 = client.post("/api/games", json={}).json()["id"]
+    h2 = client.post(f"/api/games/{gid2}/hint", json={"level": 3}).json()
+    assert len(calls) == 2  # 全部命中全局缓存
+    assert h2["move"] == h1["move"] and h2["red_win"] == h1["red_win"]
+
+
+def test_ws_seeds_from_cache_on_revisit(client):
+    """实时分析过的局面再回来（悔棋/重新打开）：第一条消息就是缓存里的深结果（seeded）。"""
+    game = client.post("/api/games", json={}).json()
+    with client.websocket_connect("/ws/analysis") as ws:
+        ws.send_json({"type": "start", "game_id": game["id"], "multipv": 2})
+        msg = ws.receive_json()
+        while msg["depth"] < 8:  # 等一次足够深的快照进缓存
+            msg = ws.receive_json()
+        assert not msg.get("seeded")
+    with client.websocket_connect("/ws/analysis") as ws:
+        ws.send_json({"type": "start", "game_id": game["id"], "multipv": 2})
+        first = ws.receive_json()
+        assert first["type"] == "info"
+        assert first.get("seeded") is True and first["depth"] >= 8
