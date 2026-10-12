@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 Side = Literal["red", "black"]
 Mode = Literal["free", "vs_ai"]
+AiStyle = Literal["standard", "varied"]
 
 
 class MoveRecord(BaseModel):
@@ -40,6 +41,7 @@ class GameView(BaseModel):
     mode: Mode
     user_side: Side | None = Field(description="人机对战时你执哪一方；自由对弈为 null")
     ai_level: int | None
+    ai_style: AiStyle = "standard"
     ai_to_move: bool = Field(description="人机对战中现在是否轮到 AI 走")
     hints_used: int
     library_id: int | None = Field(default=None, description="已保存到棋谱库时的 id")
@@ -58,6 +60,10 @@ class NewGameRequest(BaseModel):
     mode: Mode = "free"
     user_side: Side = "red"
     ai_level: int = Field(default=3, ge=1, le=10)
+    ai_style: AiStyle = Field(
+        default="standard",
+        description="standard：按难度选着；varied：8–10级在评分接近的可靠候选中变招",
+    )
     trap_id: str | None = Field(
         default=None, description="飞刀开局 id（见 /api/traps）；指定时 fen、moves 被忽略"
     )

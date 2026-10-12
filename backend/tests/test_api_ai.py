@@ -224,7 +224,7 @@ def test_hint_and_analysis_use_red_perspective(client):
 
 
 def test_level2_then_level3_hint_searches_once(client, monkeypatch):
-    """提示搜索按历史缓存：2 级只搜局面；3 级复用局面搜索，再补一次「对方最佳应着」的搜索。"""
+    """假引擎 PV 只有首着：2 级缓存局面；3 级仍按原预算补搜一次缺失的应着。"""
     from xiangqi.engine import UciEngine
 
     calls = []

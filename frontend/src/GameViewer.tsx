@@ -118,6 +118,7 @@ export default function GameViewer({ id, initialPly }: GameViewerProps) {
         moves: record.moves.slice(0, n).map((m) => m.iccs),
         user_side: mode === "vs_ai" ? side : settings.user_side,
         ai_level: settings.ai_level,
+        ai_style: settings.ai_style,
       });
       saveGameId(game.id);
       navigate("#/");

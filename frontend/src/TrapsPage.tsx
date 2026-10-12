@@ -55,12 +55,14 @@ export default function TrapsPage() {
     setStarting(`${trap.id}:${aiPlays}`);
     setStartError(null);
     try {
+      const settings = loadSettings();
       const game = await api.newGame({
         mode: "vs_ai",
         trap_id: trap.id,
         ai_plays: aiPlays,
         user_side: aiPlays === "trap" ? otherSide(trap.side) : trap.side,
-        ai_level: loadSettings().ai_level,
+        ai_level: settings.ai_level,
+        ai_style: settings.ai_style,
       });
       if (!mounted.current) return;
       saveGameId(game.id);

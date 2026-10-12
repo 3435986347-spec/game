@@ -44,11 +44,13 @@ interface AnalysisPanelProps {
   info: AnalysisInfo | null;
   error: string | null;
   finished: boolean;
+  paused?: boolean;
 }
 
 /** 引擎实时分析：前几个候选着法、各自的红方期望得分、后续变化，以及每步的目的和飞刀标注。 */
-export function AnalysisPanel({ info, error, finished }: AnalysisPanelProps) {
+export function AnalysisPanel({ info, error, finished, paused = false }: AnalysisPanelProps) {
   if (finished) return <p className="muted small">棋局已结束。</p>;
+  if (paused) return <p className="muted small" role="status">AI 行棋期间暂停实时分析，落子后自动恢复。</p>;
   if (error) return <p className="error">{error}</p>;
   if (!info) return <p className="muted small">引擎计算中……</p>;
   if (info.lines.length === 0) return <p className="muted small">这个局面没有可走的着法。</p>;

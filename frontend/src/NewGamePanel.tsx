@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import type { LevelInfo, Mode, NewGameOptions, Side, TrapSummary } from "./api";
+import type { AiStyle, LevelInfo, Mode, NewGameOptions, Side, TrapSummary } from "./api";
 import { api } from "./api";
-import { loadSettings, saveSettings } from "./settings";
+import { effectiveAiStyle, loadSettings, saveSettings } from "./settings";
 
 const DEFAULT_LEVELS: LevelInfo[] = Array.from({ length: 10 }, (_, i) => ({
   level: i + 1,
@@ -43,7 +43,10 @@ export default function NewGamePanel({
     saveSettings(settings); // 保存用户自己的选择，而不是因引擎不可用临时改成的自由对弈
     const trap = trapId || null;
     // 飞刀局：AI 执刀方按剧本走，你执受害者一方破解（难度仍有效：剧本走完或你变招后按难度下）
-    onStart({ ...settings, mode, fen: fen.trim() || undefined, trap_id: trap });
+    onStart({
+      ...settings, mode, fen: fen.trim() || undefined, trap_id: trap,
+      ai_style: effectiveAiStyle(settings.ai_level, settings.ai_style),
+    });
   };
 
   return (
@@ -67,9 +70,9 @@ export default function NewGamePanel({
         </p>
       )}
 
-      {mode === "vs_ai" && !trapId && (
+      {mode === "vs_ai" && (
         <>
-          <fieldset className="segmented" aria-label="我执">
+          {!trapId && <fieldset className="segmented" aria-label="我执">
             {(["red", "black"] as Side[]).map((side) => (
               <label key={side} className={settings.user_side === side ? "active" : ""}>
                 <input type="radio" name="side" checked={settings.user_side === side}
@@ -77,15 +80,32 @@ export default function NewGamePanel({
                 {side === "red" ? "我执红（先走）" : "我执黑"}
               </label>
             ))}
-          </fieldset>
+          </fieldset>}
           <label className="level">
             <span>
               难度 <strong>{settings.ai_level}</strong>
               {levelName && <span className="muted"> · {levelName}</span>}
             </span>
             <input type="range" min={1} max={10} step={1} value={settings.ai_level}
-              onChange={(e) => setSettings({ ...settings, ai_level: Number(e.target.value) })} />
+              onChange={(e) => {
+                const level = Number(e.target.value);
+                setSettings({ ...settings, ai_level: level, ai_style: effectiveAiStyle(level, settings.ai_style) });
+              }} />
           </label>
+          {settings.ai_level >= 8 && (
+            <>
+              <fieldset className="segmented" aria-label="AI 棋风">
+                {(["standard", "varied"] as AiStyle[]).map((style) => (
+                  <label key={style} className={settings.ai_style === style ? "active" : ""}>
+                    <input type="radio" name="ai-style" checked={settings.ai_style === style}
+                      onChange={() => setSettings({ ...settings, ai_style: style })} />
+                    {style === "varied" ? "强棋多变" : "标准"}
+                  </label>
+                ))}
+              </fieldset>
+              <p className="muted small">仅在评分接近的候选中变化；无合适变招时采用最佳着。</p>
+            </>
+          )}
         </>
       )}
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
+from typing import Literal
 
 from .uci import AnalysisResult, InfoLine, Limit
 
@@ -49,12 +50,20 @@ LEVELS: dict[int, Level] = {
     ]
 }
 MIN_LEVEL, MAX_LEVEL = min(LEVELS), max(LEVELS)
+PlayStyle = Literal["standard", "varied"]
 
 
 def get_level(level: int) -> Level:
     if level not in LEVELS:
         raise ValueError(f"难度应在 {MIN_LEVEL}–{MAX_LEVEL} 之间")
     return LEVELS[level]
+
+
+def search_multipv(level: Level, style: PlayStyle = "standard") -> int:
+    """多变模式为 8–10 级提供至少三条候选；搜索时间/节点预算仍由原难度决定。"""
+    if style not in ("standard", "varied"):
+        raise ValueError("对弈风格应为 standard 或 varied")
+    return max(3, level.multipv) if style == "varied" and level.level >= 8 else level.multipv
 
 
 def utility(line: InfoLine) -> float:
@@ -103,18 +112,30 @@ def _reliable_score(line: InfoLine) -> bool:
         return False
 
 
-def _strong_candidates(result: AnalysisResult, *, max_cp_drop: int) -> list[InfoLine]:
-    """高等级只在可比较的精确结果间变化，杀棋和 cp 差距不能被饱和 WDL 掩盖。"""
-    exact = [line for line in result.lines if _reliable_score(line)]
+def _comparable_candidates(
+    result: AnalysisResult, legal_moves: set[str] | None = None,
+) -> tuple[InfoLine | None, list[InfoLine]]:
+    exact = [
+        line for line in result.lines
+        if _reliable_score(line) and (legal_moves is None or line.move in legal_moves)
+    ]
     anchor = next((line for line in exact if line.move == result.bestmove), None)
     if anchor is None:
-        return []  # 最终最佳着法尚无精确评分，直接相信 bestmove，不比较旧候选。
+        return None, []
     seen: set[str] = set()
     lines = []
     for line in exact:
         if line.depth == anchor.depth and line.move not in seen:
             seen.add(line.move)
             lines.append(line)
+    return anchor, lines
+
+
+def _strong_candidates(result: AnalysisResult, *, max_cp_drop: int) -> list[InfoLine]:
+    """高等级只在可比较的精确结果间变化，杀棋和 cp 差距不能被饱和 WDL 掩盖。"""
+    anchor, lines = _comparable_candidates(result)
+    if anchor is None:
+        return []  # 最终最佳着法尚无精确评分，直接相信 bestmove，不比较旧候选。
     winning = [line for line in lines if line.mate is not None and line.mate > 0]
     if winning:
         fastest = min(line.mate for line in winning)
@@ -138,13 +159,69 @@ def _strong_candidates(result: AnalysisResult, *, max_cp_drop: int) -> list[Info
     return ordinary
 
 
-def choose_move(result: AnalysisResult, level: Level, rng: random.Random) -> str | None:
+def _varied_candidates(
+    result: AnalysisResult, legal_moves: set[str] | None,
+) -> list[InfoLine]:
+    anchor, lines = _comparable_candidates(result, legal_moves)
+    if anchor is None:
+        return []
+    winning = [line for line in lines if line.mate is not None and line.mate > 0]
+    if winning:
+        fastest = min(line.mate for line in winning)
+        return [line for line in winning if line.mate == fastest]
+    ordinary = [line for line in lines if line.mate is None]
+    if not ordinary:
+        slowest = min(line.mate for line in lines)
+        return [line for line in lines if line.mate == slowest]
+    scored = [line for line in ordinary if line.score_cp is not None]
+    if not scored or (anchor.mate is None and anchor.score_cp is None):
+        return []
+    if anchor.mate is not None:
+        # 有未被算出强制杀的应法时，先避开强制败，再比较这些应法。
+        anchor = max(scored, key=lambda line: (line.expected_score(), line.score_cp))
+    return [
+        line for line in scored
+        # 同一比较必须使用同一种期望分口径，不能混用原生 WDL 与 cp 的近似换算。
+        if (line.wdl is None) == (anchor.wdl is None)
+        and line.expected_score() >= anchor.expected_score() - 0.01 - 1e-12
+        and line.score_cp >= anchor.score_cp - 15
+    ]
+
+
+def choose_move(
+    result: AnalysisResult,
+    level: Level,
+    rng: random.Random,
+    *,
+    style: PlayStyle = "standard",
+    legal_moves: set[str] | None = None,
+) -> str | None:
     """按难度从候选着法中选一步。无子可走时返回 None。"""
+    search_multipv(level, style)  # 公共入口统一拒绝未知风格。
+    fallback = result.bestmove
+    if legal_moves is not None and fallback not in legal_moves:
+        return None  # 最终 bestmove 非法说明结果与局面不符，不能静默另选一着。
+    if style == "varied" and level.level >= 8:
+        lines = _varied_candidates(result, legal_moves)
+        if not lines:
+            return fallback
+        best_score = max(line.expected_score() for line in lines)
+        best_cp = max(line.score_cp or 0 for line in lines)
+        weights = [
+            math.exp(
+                (line.expected_score() - best_score) / 0.005
+                + ((line.score_cp or 0) - best_cp) / 15
+            ) * (2 if line.move == fallback else 1)
+            for line in lines
+        ]
+        return rng.choices([line.move for line in lines], weights=weights, k=1)[0]
     if level.temperature <= 0:
-        return result.bestmove  # 最终 bestmove 比停止前留下的各深度 info 更可靠。
+        return fallback  # 最终 bestmove 比停止前留下的各深度 info 更可靠。
     pool = candidate_pool(result, level)
+    if legal_moves is not None:
+        pool = [(move, value) for move, value in pool if move in legal_moves]
     if not pool:
-        return result.bestmove
+        return fallback
     best = max(u for _, u in pool)
     weights = [math.exp((u - best) / level.temperature) for _, u in pool]
     return rng.choices([move for move, _ in pool], weights=weights, k=1)[0]

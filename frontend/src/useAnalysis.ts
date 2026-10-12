@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { AnalysisInfo } from "./api";
 import { positionKey } from "./fen";
-import { AnalysisSession } from "./analysisSession";
+import { analysisRequest, AnalysisSession } from "./analysisSession";
 
 /** 分析对象：对弈中的对局（分析其当前局面），或任意局面（起始 FEN + 着法）。 */
 export type AnalysisTarget = { gameId: string } | { fen: string; moves: string[] };
@@ -17,6 +17,7 @@ const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000];
 /**
  * 通过 WebSocket 获取引擎对当前局面的实时分析。
  * enabled 为 false 时断开连接；分析对象或局面（fen）变化时自动重新开始分析，棋局结束时停止。
+ * paused 为 true 时停止搜索并保留连接，恢复后重新分析当前局面。
  * fen 是当前局面，只显示这个局面的分析结果。连接断开（如后端重启）时自动重连。
  */
 export function useAnalysis(
@@ -24,6 +25,7 @@ export function useAnalysis(
   target: AnalysisTarget | undefined,
   fen: string | undefined,
   finished: boolean,
+  paused = false,
 ): AnalysisState {
   const [info, setInfo] = useState<AnalysisInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -111,7 +113,7 @@ export function useAnalysis(
       ? { type: "start", game_id: target.gameId, multipv: 3 }
       : { type: "start", fen: target.fen, moves: target.moves, multipv: 3 },
   );
-  const targetKey = JSON.stringify([start, fen, finished]);
+  const targetKey = analysisRequest(start, fen, finished, paused).key;
 
   useEffect(() => {
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -123,13 +125,13 @@ export function useAnalysis(
     lastBest.current = null;
     setInfo(null);
     setError(null);
-    const message = finished || !start || !fen ? { type: "stop" } : JSON.parse(start);
+    const { message } = analysisRequest(start, fen, finished, paused);
     socket.send(JSON.stringify({ ...message, request_id: requestId }));
-  }, [socket, start, fen, finished, targetKey]);
+  }, [socket, start, fen, finished, paused, targetKey]);
 
   const current = info && sameFen(info.fen, fen)
     && session.current!.matches(targetKey, info.request_id) ? info : null;
-  return { info: enabled ? current : null, error: enabled ? error : null };
+  return { info: enabled && !paused ? current : null, error: enabled && !paused ? error : null };
 }
 
 /** 是否同一局面：只比较棋子摆放和走棋方（回合计数可能因计算方式不同而不同）。 */

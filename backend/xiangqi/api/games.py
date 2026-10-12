@@ -37,6 +37,7 @@ from ..engine import (
     UciEngine,
     choose_move,
     get_level,
+    search_multipv,
 )
 from ..engine.cache import _exact_score as has_exact_score
 from ..engine.cache import _quality as analysis_quality
@@ -74,6 +75,7 @@ class Game:
     mode: str = "free"  # free | vs_ai
     ai_side: int | None = None  # 人机对战时 AI 执哪一方
     ai_level: int | None = None
+    ai_style: str = "standard"
     records: list[MoveRecord] = field(default_factory=list)
     hints_used: int = 0
     library_id: int | None = None  # 保存到棋谱库后的 id
@@ -107,7 +109,10 @@ class Game:
             position = Position.start()
         else:
             position = Position.from_fen(body.fen) if body.fen else Position.start()
-        game = cls(uuid.uuid4().hex[:12], position.fen(), position, rules, mode=body.mode)
+        game = cls(
+            uuid.uuid4().hex[:12], position.fen(), position, rules,
+            mode=body.mode, ai_style=body.ai_style,
+        )
         if body.trap_id:
             if body.trap_id == "random":
                 line = game.rng.choice(list(TRAP_LINES.values()))
@@ -215,6 +220,7 @@ class Game:
             mode=self.mode,  # type: ignore[arg-type]
             user_side=None if self.ai_side is None else _side_name(-self.ai_side),
             ai_level=self.ai_level,
+            ai_style=self.ai_style,
             ai_to_move=self.ai_to_move,
             hints_used=self.hints_used,
             library_id=self.library_id,
@@ -244,6 +250,8 @@ def save_to_library(game: Game, library: Library) -> int:
     code = _result_code(game)
     user_side = None if game.ai_side is None else _side_name(-game.ai_side)
     headers = my_game_headers(mode=game.mode, ai_level=game.ai_level, user_side=user_side)
+    if game.mode == "vs_ai" and game.ai_style == "varied":
+        headers["AIStyle"] = "varied"
     game.library_id = library.save_game(
         initial_fen=game.initial_fen,
         moves=game.move_list,
@@ -357,6 +365,20 @@ async def save_game(game_id: str, request: Request) -> SavedGame:
         return SavedGame(library_id=library_id)
 
 
+def _immediate_winning_moves(
+    position: Position, rules: RuleConfig, legal_moves: set[str],
+) -> list[str]:
+    """只返回按当前完整规则和历史，走后立即获胜的着法；不改变输入局面。"""
+    wins = []
+    for text in sorted(legal_moves):
+        after = position.copy()
+        after.push(parse_iccs(text))
+        outcome = game_result(after, rules)
+        if outcome is not None and outcome.winner == position.turn:
+            wins.append(text)
+    return wins
+
+
 @router.post("/{game_id}/ai-move", response_model=GameView)
 async def ai_move(game_id: str, request: Request) -> GameView:
     """人机对战中让 AI 走一步（按对局的难度级别）。飞刀局先按剧本走，剧本走完或人变招后转引擎。"""
@@ -371,15 +393,33 @@ async def ai_move(game_id: str, request: Request) -> GameView:
                 await _autosave(request, game)
                 return game.view()
             game.book = ()  # 剧本与当前局面不符（防御性处理），转引擎
+        legal = {move_to_iccs(move) for move in game.position.legal_moves()}
+        if len(legal) == 1:
+            # 强制应着没有选着分歧，省去引擎启动和完整思考预算。
+            game.play_ai(next(iter(legal)))
+            await _autosave(request, game)
+            return game.view()
         level = get_level(game.ai_level or 1)
+        if level.level >= 8:
+            wins = _immediate_winning_moves(game.position, game.rules, legal)
+            if wins:
+                move = game.rng.choice(wins) if game.ai_style == "varied" else wins[0]
+                game.play_ai(move)
+                await _autosave(request, game)
+                return game.view()
         engine = await run_engine(_engines(request).player)
         result = await run_engine(
             lambda: request.app.state.analysis_cache.get_or_analyse(
                 engine,
-                game.initial_fen, game.move_list, limit=level.limit(), multipv=level.multipv
+                game.initial_fen, game.move_list, limit=level.limit(),
+                multipv=search_multipv(level, game.ai_style),
             )
         )
-        move = choose_move(result, level, game.rng)
+        if result.bestmove not in legal:
+            raise HTTPException(503, "引擎没有给出合法的最终着法，请重试或检查引擎配置")
+        move = choose_move(
+            result, level, game.rng, style=game.ai_style, legal_moves=legal,
+        )
         if move is None:
             raise HTTPException(500, "引擎没有给出着法")
         try:
@@ -466,11 +506,56 @@ def _confirmed_hint(result: AnalysisResult) -> bool:
     )
 
 
+def _reply_from_hint(
+    game: Game, history: tuple[str, ...], move: str, after: Position
+) -> AnalysisResult | None:
+    """从同次已完成提示中取合法应着，不冒充对后局面进行过独立搜索。"""
+    cached = game._hint_cache
+    if cached is None or cached[0] != history or not _confirmed_hint(cached[1]):
+        return None
+    source = cached[1].lines[0]
+    if source.move != move or len(source.pv) < 2:
+        return None
+    position = after.copy()
+    tail: list[str] = []
+    for text in source.pv[1:]:
+        if not _is_legal_text(position, text):
+            # 不能把非法变化截成“完整弃子证据”；补搜对方应着后再解释。
+            return None
+        tail.append(text)
+        position.push(parse_iccs(text))
+        if game_result(position, game.rules) is not None:
+            break
+    if not tail:
+        return None
+    wdl = None
+    if source.wdl is not None:
+        wdl = (source.wdl[2], source.wdl[1], source.wdl[0])
+    elif source.mate is not None:
+        # 已确认杀棋的胜负可以翻转，mate 的剩余步数不能直接沿用。
+        wdl = (0, 0, 1000) if source.mate > 0 else (1000, 0, 0)
+    reply = InfoLine(
+        1, max(0, source.depth - 1), tail,
+        score_cp=None if source.score_cp is None else -source.score_cp,
+        wdl=wdl,
+    )
+    return AnalysisResult([reply], tail[0])
+
+
 async def _hint_reply(request: Request, game: Game, move: str) -> AnalysisResult | None:
-    """推荐着法走后对方的最佳应着（3 级提示的「为什么」用）。按 (着法历史, 着法) 缓存，
-    同样命中全局分析缓存（跨对局复用）。"""
+    """推荐着法走后对方的最佳应着（3 级提示的「为什么」用）。先检查规则终局，
+    再复用同次提示的合法 PV；没有可用应着时，按原预算搜索并缓存独立结果。"""
     engines = _engines(request)
     history = tuple(game.move_list)
+    after = game.position.copy()
+    if not _is_legal_text(after, move):
+        return None
+    after.push(parse_iccs(move))
+    if game_result(after, game.rules) is not None:
+        return None
+    derived = _reply_from_hint(game, history, move, after)
+    if derived is not None:
+        return derived  # 不写入局面搜索缓存；源 PV 更新后下次会重新派生。
     key = (history, move)
     cached = game._hint_reply_cache.get(key)
     if cached is not None:

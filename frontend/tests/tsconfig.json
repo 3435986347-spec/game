@@ -8,5 +8,5 @@
     "rootDir": "../src",
     "outDir": "../node_modules/.cache/analysis-tests"
   },
-  "files": ["../src/analysisSession.ts"]
+  "files": ["../src/analysisSession.ts", "../src/settings.ts"]
 }

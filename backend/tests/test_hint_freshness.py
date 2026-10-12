@@ -217,7 +217,8 @@ def test_pending_hint_http_uses_final_bestmove_without_score_reply_or_cache(matc
 
 @pytest.mark.parametrize("bound", ["lower", "upper"])
 def test_unconfirmed_reply_is_discarded_and_not_used_for_explanation(bound):
-    game, cache, request = setup(analysis())
+    without_reply = AnalysisResult([InfoLine(1, 12, ["h2e2"], score_cp=20)], "h2e2")
+    game, cache, request = setup(without_reply)
     unconfirmed = analysis("h9g7", depth=40, bound=bound)
     game._hint_reply_cache[((), "h2e2")] = unconfirmed
     calls = []

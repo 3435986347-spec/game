@@ -59,10 +59,18 @@ def test_full_game_user_follows_hints_against_level_1(client):
     print(f"\n{len(game['moves'])} 步，结果：{game['position']['result']}")
 
 
-@pytest.mark.parametrize("level", [1, 5, 10])
-def test_each_level_produces_legal_move(client, level):
+@pytest.mark.parametrize(("level", "style"), [
+    (1, "standard"), (5, "standard"), (10, "standard"), (8, "varied"), (10, "varied"),
+])
+def test_each_level_produces_legal_move(client, level, style):
     gid = client.post(
-        "/api/games", json={"mode": "vs_ai", "user_side": "black", "ai_level": level}
+        "/api/games", json={
+            "mode": "vs_ai", "user_side": "black", "ai_level": level, "ai_style": style,
+        }
     ).json()["id"]
-    game = client.post(f"/api/games/{gid}/ai-move").json()
+    response = client.post(f"/api/games/{gid}/ai-move")
+    assert response.status_code == 200, response.text
+    game = response.json()
     assert game["moves"][0]["by_ai"] is True
+    assert Position.start().is_legal(parse_iccs(game["moves"][0]["iccs"]))
+    assert game["ai_style"] == style

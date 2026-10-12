@@ -1,4 +1,13 @@
 /** 连接与请求分别编号；相同棋盘、不同历史也不能接收上次分析。 */
+export function analysisRequest(
+  start: string | undefined, fen: string | undefined, finished: boolean, paused = false,
+): { key: string; message: { type: "start" | "stop"; [key: string]: unknown } } {
+  return {
+    key: JSON.stringify([start, fen, finished, paused]),
+    message: paused || finished || !start || !fen ? { type: "stop" } : JSON.parse(start),
+  };
+}
+
 export class AnalysisSession {
   private connectionCounter = 0;
   private requestCounter = 0;

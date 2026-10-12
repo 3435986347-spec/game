@@ -12,7 +12,7 @@ import { sideToMove } from "./fen";
 import { isTypingTarget } from "./keyboard";
 import { MoveReview, useLlmStatus } from "./ReviewPanel";
 import { gameHash, navigate, trainHash } from "./router";
-import { loadLiveAnalysis, loadSavedGameId, saveGameId, saveLiveAnalysis } from "./settings";
+import { effectiveAiStyle, loadLiveAnalysis, loadSavedGameId, saveGameId, saveLiveAnalysis } from "./settings";
 import { useAnalysis } from "./useAnalysis";
 import { useEngineStatus } from "./useEngineStatus";
 import { useLiveAnalysis } from "./useLiveAnalysis";
@@ -228,11 +228,13 @@ export default function PlayPage() {
     }
   };
 
+  const analysisPaused = !!game?.ai_to_move || thinking;
   const analysis = useAnalysis(
     analysisOn && engineReady,
     game ? { gameId: game.id } : undefined,
     pos?.fen,
     finished,
+    analysisPaused,
   );
   const live = useLiveAnalysis(game, liveOn && engineReady);
   const toggleLive = (on: boolean) => {
@@ -314,7 +316,7 @@ export default function PlayPage() {
             )}
             <p className="muted small game-meta">
               {game.mode === "vs_ai"
-                ? `人机对战 · 你执${sideText(game.user_side!)} · 难度 ${game.ai_level}`
+                ? `人机对战 · 你执${sideText(game.user_side!)} · 难度 ${game.ai_level} · ${effectiveAiStyle(game.ai_level, game.ai_style) === "varied" ? "强棋多变" : "标准"}`
                 : "自由对弈（双方都由你来走）"}
               {game.hints_used > 0 && ` · 已用提示 ${game.hints_used} 次`}
             </p>
@@ -443,7 +445,7 @@ export default function PlayPage() {
                 显示实时分析（会直接显示最佳着法，下棋练习时建议关闭）
               </label>
               {analysisOn && (
-                <AnalysisPanel info={analysis.info} error={analysis.error} finished={finished} />
+                <AnalysisPanel info={analysis.info} error={analysis.error} finished={finished} paused={analysisPaused} />
               )}
               <p className="muted small">引擎：{engine.name}</p>
             </>

@@ -2,6 +2,7 @@
 
 export type Side = "red" | "black";
 export type Mode = "free" | "vs_ai";
+export type AiStyle = "standard" | "varied";
 
 export interface MoveRecord {
   iccs: string;
@@ -34,6 +35,8 @@ export interface GameView {
   /** 人机对战时你执哪一方；自由对弈为 null */
   user_side: Side | null;
   ai_level: number | null;
+  /** 旧服务端未返回时按标准棋风显示。 */
+  ai_style?: AiStyle;
   /** 人机对战中现在是否轮到 AI 走 */
   ai_to_move: boolean;
   hints_used: number;
@@ -52,6 +55,8 @@ export interface NewGameOptions {
   mode: Mode;
   user_side?: Side;
   ai_level: number;
+  /** 高级别的接近评分候选变化；省略时采用标准棋风。 */
+  ai_style?: AiStyle;
   /** 飞刀开局 id；vs_ai 时 AI 按剧本走（默认执刀方，你破解） */
   trap_id?: string | null;
   /** 人机对战 + 飞刀时 AI 的角色：trap = AI 执刀方；victim = AI 按受害方剧本走（你练飞刀） */
