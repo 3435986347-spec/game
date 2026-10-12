@@ -72,20 +72,79 @@ def utility(line: InfoLine) -> float:
 
 def candidate_pool(result: AnalysisResult, level: Level) -> list[tuple[str, float]]:
     """可供选择的候选着法及其价值：只保留比最佳着法差得不多（max_drop 以内）的。"""
-    candidates = [(line.move, utility(line)) for line in result.lines if line.pv]
+    lines = result.lines
+    if level.level in (8, 9):
+        lines = _strong_candidates(result, max_cp_drop=50 if level.level == 8 else 30)
+    candidates = [(line.move, utility(line)) for line in lines if line.pv]
     if not candidates:
         return []
     best = max(u for _, u in candidates)
     return [(move, u) for move, u in candidates if u >= best - level.max_drop]
 
 
+def _reliable_score(line: InfoLine) -> bool:
+    if not line.pv or line.bound is not None:
+        return False
+    if line.wdl is not None and (
+        len(line.wdl) != 3
+        or any(type(value) is not int or value < 0 for value in line.wdl)
+        or sum(line.wdl) != 1000
+    ):
+        return False
+    if line.mate is not None and type(line.mate) is not int:
+        return False
+    if line.score_cp is not None and type(line.score_cp) is not int:
+        return False
+    if line.wdl is None and line.mate is None and line.score_cp is None:
+        return False
+    try:
+        return math.isfinite(utility(line))
+    except OverflowError:
+        return False
+
+
+def _strong_candidates(result: AnalysisResult, *, max_cp_drop: int) -> list[InfoLine]:
+    """高等级只在可比较的精确结果间变化，杀棋和 cp 差距不能被饱和 WDL 掩盖。"""
+    exact = [line for line in result.lines if _reliable_score(line)]
+    anchor = next((line for line in exact if line.move == result.bestmove), None)
+    if anchor is None:
+        return []  # 最终最佳着法尚无精确评分，直接相信 bestmove，不比较旧候选。
+    seen: set[str] = set()
+    lines = []
+    for line in exact:
+        if line.depth == anchor.depth and line.move not in seen:
+            seen.add(line.move)
+            lines.append(line)
+    winning = [line for line in lines if line.mate is not None and line.mate > 0]
+    if winning:
+        fastest = min(line.mate for line in winning)
+        return [line for line in winning if line.mate == fastest]
+    ordinary = [line for line in lines if line.mate is None]
+    if not ordinary:
+        # 负 mate 的绝对值越大，抵抗越久；mate 0 表示已经被杀。
+        slowest = min(line.mate for line in lines)
+        return [line for line in lines if line.mate == slowest]
+    scored = [line for line in ordinary if line.score_cp is not None]
+    if scored:
+        if anchor.mate is None and anchor.score_cp is None:
+            return []  # 不能拿其他候选的 cp 与最佳着法缺失的 cp 比较。
+        best_cp = (
+            anchor.score_cp if anchor.mate is None else max(line.score_cp for line in scored)
+        )
+        return [line for line in scored if line.score_cp >= best_cp - max_cp_drop]
+    # 没有 cp 时，只有未饱和 WDL 才能支持候选比较；饱和结果直接回退最终最佳着法。
+    if any(line.expected_score() in (0.0, 1.0) for line in ordinary):
+        return []
+    return ordinary
+
+
 def choose_move(result: AnalysisResult, level: Level, rng: random.Random) -> str | None:
     """按难度从候选着法中选一步。无子可走时返回 None。"""
+    if level.temperature <= 0:
+        return result.bestmove  # 最终 bestmove 比停止前留下的各深度 info 更可靠。
     pool = candidate_pool(result, level)
     if not pool:
         return result.bestmove
     best = max(u for _, u in pool)
-    if level.temperature <= 0:
-        return next(move for move, u in pool if u == best)
     weights = [math.exp((u - best) / level.temperature) for _, u in pool]
     return rng.choices([move for move, _ in pool], weights=weights, k=1)[0]

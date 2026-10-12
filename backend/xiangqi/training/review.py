@@ -7,7 +7,7 @@
 直接拿「走之前」和「下一个局面」比较，误差会被当成失误。所以：
 - 走的着法在走之前那次搜索的候选里（MultiPV 前 3）：直接比较同一次搜索里最佳着法和这步的评估；
 - 不在候选里：它不会比最后一个候选好，取「下一个局面的评估」和「最后一个候选」中较低的那个；
-- 走了引擎的最佳着法：不算损失。
+- 走了引擎的最佳着法：非终局时不算搜索波动造成的损失；规则确定的终局结果优先。
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 from ..core import RED, Position, RuleConfig, game_result, parse_iccs
 from ..core.features import game_phase
-from ..engine import AnalysisCache, AnalysisResult, Limit, UciEngine
+from ..engine import AnalysisCache, AnalysisResult, EngineError, Limit, UciEngine
 from ..llm import EngineLine, ExplainContext, build_context
 
 GRADES = ("妙着", "好棋", "可以", "缓着", "失误", "漏着")
@@ -33,6 +33,7 @@ MULTIPV = 3
 _UNIQUE_GAP = 0.25
 _UNIQUE_MIN_SCORE = 0.40
 _FORCED_MOVES = 3  # 合法着法不超过这么多时（如被将军只能这样应），找到最佳着法不算妙着
+_GRADE_EPSILON = 1e-12  # 仅容忍浮点减法的表示误差，远小于引擎评分的最小精度。
 
 
 def grade_move(
@@ -42,25 +43,27 @@ def grade_move(
     gap: float | None,
     best_score: float | None = None,
     obvious: bool = False,
+    terminal: bool = False,
 ) -> str:
     """按期望得分的下降评级。gap 为最佳着法比第二名高出多少（只有一个候选时为 None），
     best_score 为最佳着法的期望得分；obvious 为「显而易见」的着法（吃回对方刚吃掉的子、
     几乎没得选），这种着法再好也不算妙着。"""
     if (
         is_best
+        and not terminal
         and not obvious
         and gap is not None
         and gap >= _UNIQUE_GAP
         and (best_score is None or best_score >= _UNIQUE_MIN_SCORE)
     ):
         return "妙着"
-    if drop <= 0.02:
+    if drop <= 0.02 + _GRADE_EPSILON:
         return "好棋"
-    if drop <= 0.05:
+    if drop <= 0.05 + _GRADE_EPSILON:
         return "可以"
-    if drop <= 0.10:
+    if drop <= 0.10 + _GRADE_EPSILON:
         return "缓着"
-    if drop <= 0.20:
+    if drop <= 0.20 + _GRADE_EPSILON:
         return "失误"
     return "漏着"
 
@@ -86,11 +89,23 @@ class PositionEval:
 
 
 def lines_from(result: AnalysisResult) -> list[EngineLine]:
-    return [
-        EngineLine(line.move, tuple(line.pv), round(line.expected_score(), 4), line.mate)
-        for line in result.lines
-        if line.pv
-    ]
+    """只把连续、已确认的候选用于评级，未确认的首着不能伪装为均势。"""
+    lines = []
+    for rank, line in enumerate(result.lines, start=1):
+        if (
+            getattr(line, "bound", None) is not None
+            or getattr(line, "multipv", rank) != rank
+            or not line.pv
+        ):
+            if rank == 1:
+                raise EngineError("引擎没有给出已确认的最佳着法评分，请重试")
+            break
+        lines.append(
+            EngineLine(line.move, tuple(line.pv), round(line.expected_score(), 4), line.mate)
+        )
+    if not lines:
+        raise EngineError("引擎没有给出可用于评级的候选着法，请重试")
+    return lines
 
 
 async def analyse_positions(
@@ -136,12 +151,48 @@ async def evaluate_position(
     rules: RuleConfig,
     multipv: int = MULTIPV,
     cache: AnalysisCache | None = None,
+    reuse_reply_from: PositionEval | None = None,
 ) -> PositionEval:
-    """进行中的对局里的一个局面（初始局面 + moves）：按规则已经结束就按结果计分，否则请引擎分析。"""
+    """按规则优先判定终局，再评估局面。
+
+    训练讲解只需要一个应着时，可从前局面同次搜索的候选提取合法后续，避免重复搜索。
+    只有匹配最后一步且带合法应着的候选可复用；缺失时照常搜索。此结果不写入分析缓存。
+    """
     pos = Position.from_fen(initial_fen, validate=False)
     for text in moves:
         pos.push(parse_iccs(text))
-    return await _evaluate(engine, initial_fen, moves, pos, limit, rules, multipv, True, cache)
+    return await _evaluate(
+        engine, initial_fen, moves, pos, limit, rules, multipv, True, cache, reuse_reply_from
+    )
+
+
+def _candidate_reply(
+    pos: Position, moves: list[str], before: PositionEval | None
+) -> PositionEval | None:
+    """从真实前局面候选中取得对手应着，评分翻转为当前走棋方视角。"""
+    if before is None or not moves or before.ply != len(moves) - 1 or before.turn != -pos.turn:
+        return None
+    played = next((line for line in before.lines if line.move == moves[-1]), None)
+    if played is None or len(played.pv) < 2 or played.pv[0] != played.move:
+        return None
+    reply_pos = pos.copy()
+    remaining: list[str] = []
+    for text in played.pv[1:]:
+        try:
+            move = parse_iccs(text)
+        except ValueError:
+            break
+        if not reply_pos.is_legal(move):
+            break
+        remaining.append(text)
+        reply_pos.push(move)
+    if not remaining:
+        return None
+    score = round(1.0 - played.score, 4)
+    red = score if pos.turn == RED else 1.0 - score
+    # 前局面的 mate 步数不能原样搬到对手视角；讲解使用合法应着和同次搜索的得分。
+    line = EngineLine(remaining[0], tuple(remaining), score)
+    return PositionEval(len(moves), pos.turn, round(red, 4), [line])
 
 
 async def _evaluate(
@@ -154,6 +205,7 @@ async def _evaluate(
     multipv: int,
     final: bool,
     cache: AnalysisCache | None = None,
+    reuse_reply_from: PositionEval | None = None,
 ) -> PositionEval:
     """final：对局停在这个局面（按规则已经结束的话就是终局）。"""
     ply = len(moves)
@@ -161,13 +213,16 @@ async def _evaluate(
     if result is not None:
         red = 0.5 if result.winner is None else (1.0 if result.winner == RED else 0.0)
         return PositionEval(ply, pos.turn, red, [], result.text)
-    analysis = None
-    if cache is not None:
-        analysis = cache.get(initial_fen, moves, multipv, limit.movetime_ms)
-    if analysis is None:
-        analysis = await engine.analyse(initial_fen, moves, limit=limit, multipv=multipv)
-        if cache is not None:
-            cache.put(initial_fen, moves, multipv, limit.movetime_ms, analysis)
+    if multipv == 1:
+        reply = _candidate_reply(pos, moves, reuse_reply_from)
+        if reply is not None:
+            return reply
+    # 节点/深度/混合预算由共享入口直接搜索，纯时间请求安全复用与合并。
+    analysis = (
+        await cache.get_or_analyse(engine, initial_fen, moves, limit=limit, multipv=multipv)
+        if cache is not None
+        else await engine.analyse(initial_fen, moves, limit=limit, multipv=multipv)
+    )
     lines = lines_from(analysis)
     score = lines[0].score if lines else 0.5
     red = score if pos.turn == RED else 1.0 - score
@@ -184,11 +239,16 @@ class MoveGrade:
     win_after: float  # 走棋方视角：走完这步之后
     is_best: bool  # 是否就是引擎的最佳着法
     phase: str
+    terminal: bool = False  # 规则确定的结果优先于「最佳着免搜索波动」。
 
     @property
     def drop(self) -> float:
         # 走了引擎的最佳着法时，下一个局面评估的波动只是搜索误差，不算损失
-        return 0.0 if self.is_best else max(0.0, self.win_before - self.win_after)
+        return (
+            0.0
+            if self.is_best and not self.terminal
+            else max(0.0, self.win_before - self.win_after)
+        )
 
 
 def grade_moves(initial_fen: str, moves: list[str], evals: list[PositionEval]) -> list[MoveGrade]:
@@ -238,7 +298,8 @@ def _grade(
         win_after = min(after.score_for(mover), lines[-1].score)
     gap = lines[0].score - lines[1].score if len(lines) >= 2 else None
     move = parse_iccs(text)
-    could_be_unique = is_best and gap is not None and gap >= _UNIQUE_GAP
+    terminal = after.terminal is not None
+    could_be_unique = not terminal and is_best and gap is not None and gap >= _UNIQUE_GAP
     # 生成全部合法着法较慢，只在可能评为妙着时才检查是不是「几乎没得选」
     obvious = could_be_unique and (
         move[1] == last_capture or len(pos.legal_moves()) <= _FORCED_MOVES
@@ -252,9 +313,11 @@ def _grade(
         win_after=round(win_after, 4),
         is_best=is_best,
         phase=game_phase(pos),
+        terminal=terminal,
     )
     grade.grade = grade_move(
-        grade.drop, is_best=is_best, gap=gap, best_score=win_before, obvious=obvious
+        grade.drop, is_best=is_best, gap=gap, best_score=win_before, obvious=obvious,
+        terminal=terminal,
     )
     return grade
 

@@ -133,6 +133,10 @@ def test_analysis_websocket(client):
         assert info["fen"] == client.get(f"/api/games/{gid}").json()["position"]["fen"]
         line = info["lines"][0]
         assert {"move", "cn", "pv_cn", "red_win", "score_cp", "mate"} <= line.keys()
+        assert info["status"] == "searching"
+        assert info["search"]["nodes"] == 1000 * info["depth"]
+        assert info["search"]["elapsed_ms"] == info["depth"]
+        assert info["search"]["nps"] == 100000
         ws.send_json({"type": "stop"})
         while (msg := ws.receive_json())["type"] == "info":
             pass  # 停止前可能还有在途的消息
@@ -149,6 +153,23 @@ def test_analysis_websocket_without_engine():
             ws.send_json({"type": "start", "game_id": gid})
             msg = ws.receive_json()
     assert msg["type"] == "error" and "未配置" in msg["message"]
+
+
+def test_analysis_request_id_scopes_info_errors_and_stop_without_breaking_connection(client):
+    gid = new_game(client)["id"]
+    with client.websocket_connect("/ws/analysis") as ws:
+        ws.send_json({"type": "start", "game_id": gid, "request_id": "first"})
+        assert ws.receive_json()["request_id"] == "first"
+        ws.send_json({"type": "start", "game_id": gid, "multipv": "bad", "request_id": "bad"})
+        while (message := ws.receive_json())["type"] == "info":
+            assert message["request_id"] == "first"
+        assert message["type"] == "error" and message["request_id"] == "bad"
+        ws.send_json({"type": "start", "game_id": gid, "request_id": "current"})
+        assert ws.receive_json()["request_id"] == "current"
+        ws.send_json({"type": "stop", "request_id": "stop"})
+        while (message := ws.receive_json())["type"] == "info":
+            assert message["request_id"] == "current"
+        assert message == {"type": "stopped", "request_id": "stop"}
 
 
 # ---- 评审中发现的问题的回归测试 ----
@@ -260,3 +281,8 @@ def test_ws_seeds_from_cache_on_revisit(client):
         first = ws.receive_json()
         assert first["type"] == "info"
         assert first.get("seeded") is True and first["depth"] >= 8
+        assert first["search"] is None  # 旧搜索节点和耗时不混入本次搜索。
+        live = ws.receive_json()
+        assert not live.get("seeded") and live["status"] == "searching"
+        assert live["search"]["nodes"] == 1000 * live["depth"]
+        assert live["search"]["elapsed_ms"] == live["depth"]

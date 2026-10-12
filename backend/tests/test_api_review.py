@@ -258,3 +258,119 @@ movetime_ms = 250
 
     assert os.environ["MY_TEST_LLM_KEY"] == "sk-from-dotenv"
     monkeypatch.delenv("MY_TEST_LLM_KEY")
+
+
+@pytest.mark.parametrize("black", [False, True])
+def test_old_terminal_best_review_upgrades_without_engine_and_persists(tmp_path, black):
+    from xiangqi.core import Position
+    from xiangqi.library import moves_hash
+    from xiangqi.llm import EngineLine
+    from xiangqi.training import PositionEval, grade_moves, review_rows, summarize
+
+    with TestClient(create_app(make_config(tmp_path, engine=False))) as client:
+        library = client.app.state.library
+        position = Position.start()
+        position.turn = -1 if black else 1
+        position.halfmove_clock = 1
+        side = position.turn
+        move, other = ("a9a8", "h7e7") if black else ("a0a1", "h2e2")
+        fen = position.fen()
+        gid = library.save_game(
+            initial_fen=fen, moves=[move], result="1/2-1/2", headers={"Red": "我", "Black": "我"}
+        )
+        before = PositionEval(
+            0, side, 0.1 if black else 0.9,
+            [EngineLine(move, (move,), 0.9), EngineLine(other, (other,), 0.3)],
+        )
+        after = PositionEval(1, -side, 0.5, [], "和棋（自然限着）")
+        grades = grade_moves(fen, [move], [before, after])
+        # 构造旧策略留下的完整分析证据及错误评级、准确率、关键时刻。
+        grades[0].terminal = False
+        grades[0].grade = "妙着"
+        summary = summarize(grades, [1, -1])
+        summary["tags"] = [{"tag": "捉双", "count": 1}]
+        rows = review_rows([before, after], grades, {1: {"headline": "旧妙着", "tags": ["捉双"]}})
+        library.save_review(
+            gid, moves_hash=moves_hash(fen, [move]), engine="旧引擎", movetime_ms=1500,
+            summary=summary, rows=rows,
+        )
+        conn = library.connect()
+        conn.execute(
+            "UPDATE reviews SET created_at = '2000-01-01T00:00:00Z' WHERE game_id = ?", (gid,)
+        )
+        conn.commit()
+        original_info, original_rows = library.get_review(gid)
+        assert not client.app.state.engines.configured
+        report = client.get(f"/api/library/games/{gid}/review").json()["report"]
+        assert report["moves"][0]["grade"] == "漏着"
+        assert report["moves"][0]["drop"] == 0.4
+        assert report["moves"][0]["explanation"] is None
+        assert report["key_moments"] == [1] and report["tags"] == []
+        stats = report["stats"]["black" if black else "red"]
+        assert stats["accuracy"] < 100.0 and stats["grades"]["漏着"] == 1
+        info, saved_rows = library.get_review(gid)
+        assert info["created_at"] == report["created_at"] == "2000-01-01T00:00:00Z"
+        assert info["summary"]["grade_policy"] == 2
+        assert saved_rows[1]["is_best"] == 1  # 保持实际搜索里的最佳着语义。
+        assert saved_rows[1]["grade"] == "漏着"
+        assert [row["lines"] for row in saved_rows] == [row["lines"] for row in original_rows]
+        assert not library.update_review_grades(
+            gid, moves_hash=original_info["moves_hash"], previous_summary=original_info["summary"],
+            summary={"wrong": True}, rows=original_rows,
+        )  # 第一次升级后的报告不会被并发拿着旧summary的请求覆盖。
+        assert client.get(f"/api/library/games/{gid}/review").json()["report"] == report
+
+
+@pytest.mark.parametrize("had_explanation", [False, True])
+def test_grade_upgrade_preserves_concurrently_saved_unchanged_explanation(
+    tmp_path, monkeypatch, had_explanation
+):
+    from xiangqi.library import moves_hash
+    from xiangqi.llm import EngineLine
+    from xiangqi.training import PositionEval, grade_moves, review_rows, summarize
+
+    fresh = {
+        "headline": "新保存的讲解", "why": "已核对的原因", "better": "本步走法",
+        "principle": "保持先手", "tags": [], "source": "template",
+        "provider": None, "model": None, "note": None,
+    }
+    old = {**fresh, "headline": "旧快照里的讲解"}
+    moves = ["a0a1", "a9a8"]
+    evals = [
+        PositionEval(0, 1, 0.9, [EngineLine("a0a1", ("a0a1",), 0.9)]),
+        PositionEval(1, -1, 0.1, [EngineLine("a9a8", ("a9a8",), 0.9)]),
+        PositionEval(2, 1, 0.5, [], "和棋（自然限着）"),
+    ]
+    grades = grade_moves(START_FEN, moves, evals)
+    grades[1].terminal = False
+    grades[1].grade = "好棋"  # 第二步需要升级并清掉不适用的旧讲解。
+    explanations = {1: old, 2: old} if had_explanation else {}
+    with TestClient(create_app(make_config(tmp_path, engine=False))) as client:
+        library = client.app.state.library
+        gid = library.save_game(
+            initial_fen=START_FEN, moves=moves, result="1/2-1/2",
+            headers={"Red": "我", "Black": "我"},
+        )
+        library.save_review(
+            gid, moves_hash=moves_hash(START_FEN, moves), engine="旧引擎", movetime_ms=1500,
+            summary=summarize(grades, [1, -1]), rows=review_rows(evals, grades, explanations),
+        )
+        update = library.update_review_grades
+
+        def concurrent_explanations(*args, **kwargs):
+            # _load_review 已取得快照；仅保存讲解，不改变reviews.summary或moves_hash。
+            library.set_explanation(gid, 1, fresh)
+            library.set_explanation(gid, 2, fresh)
+            return update(*args, **kwargs)
+
+        monkeypatch.setattr(library, "update_review_grades", concurrent_explanations)
+        response = client.get(f"/api/library/games/{gid}/review")
+        assert response.status_code == 200, response.text
+        report = response.json()["report"]
+        assert report["moves"][0]["grade"] == "好棋"
+        assert report["moves"][0]["explanation"] == fresh
+        assert report["moves"][1]["grade"] == "漏着"
+        assert report["moves"][1]["explanation"] is None
+        _, stored = library.get_review(gid)
+        assert stored[1]["explanation"] is not None
+        assert stored[2]["explanation"] is None

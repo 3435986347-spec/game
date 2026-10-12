@@ -120,7 +120,17 @@ export interface AnalysisLine {
   trap: TrapNote | null;
 }
 
+export interface AnalysisSearch {
+  depth: number;
+  /** 引擎报告的本次累计搜索节点；MultiPV 不求和 */
+  nodes: number | null;
+  /** 引擎从本次实际搜索开始计算的耗时 */
+  elapsed_ms: number | null;
+  nps: number | null;
+}
+
 export interface AnalysisInfo {
+  request_id?: string;
   type: "info";
   /** 分析任意局面（fen + moves）时为 null */
   game_id: string | null;
@@ -129,8 +139,13 @@ export interface AnalysisInfo {
   depth: number;
   /** 当前局面疑似飞刀时的告警/推荐 */
   trap_alert: TrapAlert | null;
-  /** 本条来自缓存里的更深结果（前端忽略比它浅的实时更新，直到实时超过它） */
+  /** 候选来自旧缓存；当前搜索进度仍通过 search 独立更新 */
   seeded?: boolean;
+  status: "searching" | "complete";
+  /** 仅本次搜索的真实统计，缓存预填时为 null */
+  search: AnalysisSearch | null;
+  /** 前端对相邻实时结果的比较，不含缓存候选 */
+  best_unchanged?: boolean;
   lines: AnalysisLine[];
 }
 
@@ -160,6 +175,7 @@ export interface TrapDetail {
   side: Side;
   intro: string;
   principle: string;
+  source: string;
   trap_ply: number;
   /** 陷阱点局面（走完弃子着法之后，轮到受害者走） */
   trap_fen: string;

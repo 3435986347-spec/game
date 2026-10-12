@@ -26,7 +26,15 @@ from ..core.variation import pv_to_chinese
 from ..engine import EngineError, EngineUnavailable, Limit
 from ..library import Library, moves_hash
 from ..llm import EngineLine, ExplainService
-from ..training import collect_from_review, move_context, review_game, review_rows
+from ..training import (
+    PositionEval,
+    collect_from_review,
+    grade_moves,
+    move_context,
+    review_game,
+    review_rows,
+    summarize,
+)
 from ..training.review import PHASES
 from .games import _get as get_live_game
 from .games import save_to_library
@@ -43,6 +51,7 @@ from .schemas import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["复盘与讲解"])
+_GRADE_POLICY = 2  # 规则确定的终局结果优先于「最佳着免损失」。
 
 
 @dataclass
@@ -122,6 +131,7 @@ async def _run_review(app, job: ReviewJob, record: dict) -> None:
             job.progress += 1
         tags = Counter(t for e in explanations.values() for t in e["tags"] if t not in PHASES)
         summary["tags"] = [{"tag": t, "count": n} for t, n in tags.most_common()]
+        summary["grade_policy"] = _GRADE_POLICY
 
         await asyncio.to_thread(
             library.save_review,
@@ -206,7 +216,55 @@ async def _load_review(request: Request, game_id: int, record: dict):
     if info["moves_hash"] != moves_hash(record["initial_fen"], record["moves"]):
         await asyncio.to_thread(library.delete_review, game_id)
         return None
+    if info["summary"].get("grade_policy", 0) < _GRADE_POLICY:
+        # 老报告已经保存了全部分析证据，升级评级只需重算，无须重新搜索或请求讲解。
+        return await asyncio.to_thread(_upgrade_grades, library, game_id, record, info, rows)
     return info, rows
+
+
+def _upgrade_grades(
+    library: Library, game_id: int, record: dict, info: dict, rows: list[dict]
+) -> tuple[dict, list[dict]] | None:
+    initial_turn = Position.from_fen(record["initial_fen"], validate=False).turn
+    evals = [
+        PositionEval(
+            row["ply"], initial_turn if row["ply"] % 2 == 0 else -initial_turn,
+            row["red_win"], _lines(row), row["terminal"],
+        )
+        for row in rows
+    ]
+    grades = grade_moves(record["initial_fen"], record["moves"], evals)
+    upgraded = review_rows(evals, grades, {})
+    clear_explanations = []
+    for row, changes in zip(rows, upgraded, strict=True):
+        changed = any(
+            row[key] != changes[key]
+            for key in ("grade", "win_before", "win_after") if key in changes
+        )
+        row.update(changes)
+        if changed:
+            row["explanation"] = None  # 原来的「好棋」讲解已不适用，按需重新生成。
+            clear_explanations.append(row["ply"])
+    previous_summary = info["summary"]
+    focus = [RED if side == "red" else -RED for side in previous_summary["focus"]]
+    summary = {**previous_summary, **summarize(grades, focus)}
+    tags = Counter(
+        tag
+        for ply in summary["key_moments"]
+        if rows[ply]["explanation"]
+        for tag in json.loads(rows[ply]["explanation"]).get("tags", [])
+        if tag not in PHASES
+    )
+    summary["tags"] = [{"tag": tag, "count": count} for tag, count in tags.most_common()]
+    summary["grade_policy"] = _GRADE_POLICY
+    library.update_review_grades(
+        game_id, moves_hash=info["moves_hash"], previous_summary=previous_summary,
+        summary=summary, rows=rows, clear_explanations=clear_explanations,
+    )
+    current = library.get_review(game_id)
+    if current is None or current[0]["moves_hash"] != info["moves_hash"]:
+        return None
+    return current
 
 
 async def _report_view(request: Request, game_id: int, record: dict) -> ReviewView | None:
@@ -241,7 +299,11 @@ def _report(record: dict, info: dict, rows: list[dict]) -> ReviewReport:
                 phase=row["phase"],
                 win_before=win_before,
                 win_after=win_after,
-                drop=0.0 if row["is_best"] else round(max(0.0, win_before - win_after), 4),
+                drop=(
+                    0.0
+                    if row["is_best"] and row["terminal"] is None
+                    else round(max(0.0, win_before - win_after), 4)
+                ),
                 best_move=best.move if best else None,
                 best_cn=best_pv_cn[0] if best_pv_cn else None,
                 best_pv_cn=best_pv_cn,

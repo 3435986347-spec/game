@@ -38,6 +38,8 @@ def test_parse_pikafish_info_line():
         score_cp=-35,
         wdl=(120, 700, 180),
         nodes=123456,
+        time_ms=137,
+        nps=900000,
     )
     assert info.expected_score() == pytest.approx(0.47)
 
@@ -53,6 +55,23 @@ def test_parse_mate_and_ignored_lines():
     assert parse_info("info depth 3 score mate -2 pv e0e1", "pikafish").mate == -2
     assert parse_info("info string NNUE evaluation enabled", "pikafish") is None
     assert parse_info("info depth 9 currmove h2e2 currmovenumber 1", "pikafish") is None
+
+
+def test_missing_engine_progress_stays_unknown():
+    info = parse_info("info depth 3 score cp 20 pv h0g2", "pikafish")
+    assert info.nodes is None and info.time_ms is None and info.nps is None
+
+
+def test_bound_update_preserves_candidate_but_advances_real_progress():
+    from xiangqi.engine.uci import _merge
+
+    previous = InfoLine(1, 25, ["h0g2"], score_cp=20, nodes=100, time_ms=20, nps=5000)
+    lines = {1: previous}
+    _merge(lines, InfoLine(1, 26, ["i0h0"], score_cp=900, bound="lower",
+                          nodes=500, time_ms=40, nps=12500))
+    assert lines[1].pv == previous.pv and lines[1].score_cp == previous.score_cp
+    assert lines[1].depth == 25
+    assert (lines[1].nodes, lines[1].time_ms, lines[1].nps) == (500, 40, 12500)
 
 
 @pytest.mark.parametrize(
@@ -214,8 +233,90 @@ def _result(*scores: float) -> AnalysisResult:
 
 
 def test_full_strength_always_picks_best():
-    result = _result(0.40, 0.55, 0.30)  # 最佳着法不一定排在第一（不同深度）
-    assert choose_move(result, get_level(10), random.Random(0)) == "a0a2"
+    result = _result(0.40, 0.55, 0.30)  # 不同深度遗留的 info 不能覆盖最终 bestmove。
+    assert choose_move(result, get_level(10), random.Random(0)) == "a0a1"
+    result.bestmove = "b0c2"  # 最终着法尚未来得及输出带评分的 info。
+    assert choose_move(result, get_level(10), random.Random(0)) == "b0c2"
+    result.bestmove = None
+    assert choose_move(result, get_level(10), random.Random(0)) is None
+
+
+@pytest.mark.parametrize("level,cp_drop", [(8, 50), (9, 30)])
+def test_strong_variation_limits_cp_drop_when_wdl_saturates(level, cp_drop):
+    from xiangqi.engine.difficulty import candidate_pool
+
+    for wdl, best_cp in [((1000, 0, 0), 1000), ((0, 0, 1000), -1000)]:
+        lines = [
+            InfoLine(1, 20, ["a0a1"], score_cp=best_cp, wdl=wdl),
+            InfoLine(2, 20, ["a0a2"], score_cp=best_cp - cp_drop, wdl=wdl),
+            InfoLine(3, 20, ["a0a3"], score_cp=best_cp - cp_drop - 1, wdl=wdl),
+            InfoLine(4, 20, ["a0a4"], score_cp=best_cp - 600, wdl=wdl),
+        ]
+        result = AnalysisResult(lines, "a0a1")
+        assert [move for move, _ in candidate_pool(result, get_level(level))] == [
+            "a0a1", "a0a2",
+        ]
+        picks = {choose_move(result, get_level(level), random.Random(s)) for s in range(200)}
+        assert picks == {"a0a1", "a0a2"}
+
+
+@pytest.mark.parametrize("level", [8, 9])
+@pytest.mark.parametrize("bad_score", [
+    {"score_cp": 1000, "bound": "upper"},
+    {"score_cp": 1000, "bound": "lower"},
+    {"score_cp": float("nan")},
+    {"score_cp": float("inf")},
+    {"score_cp": True},
+    {"mate": float("inf")},
+    {"wdl": (1000, 1000, 0)},
+    {"wdl": (1001, 0, -1)},
+    {"wdl": (1000.0, 0, 0)},
+    {},
+])
+def test_strong_variation_rejects_unreliable_scores(level, bad_score):
+    result = AnalysisResult([
+        InfoLine(1, 20, ["a0a1"], score_cp=5, wdl=(300, 400, 300)),
+        InfoLine(2, 20, ["a0a2"], **bad_score),
+    ], "a0a1")
+    assert choose_move(result, get_level(level), random.Random(0)) == "a0a1"
+    result.bestmove = "a0a2"  # 无精确最佳着法时，不根据其他 info 改选着法。
+    assert choose_move(result, get_level(level), random.Random(0)) == "a0a2"
+
+
+@pytest.mark.parametrize("level", [8, 9])
+def test_strong_variation_preserves_long_mate_and_delays_forced_loss(level):
+    result = AnalysisResult([
+        InfoLine(1, 20, ["a0a1"], mate=100, wdl=(1000, 0, 0)),
+        InfoLine(2, 20, ["a0a2"], score_cp=500, wdl=(1000, 0, 0)),
+        InfoLine(3, 20, ["a0a3"], mate=101, wdl=(1000, 0, 0)),
+    ], "a0a1")
+    assert {choose_move(result, get_level(level), random.Random(s)) for s in range(200)} == {
+        "a0a1",
+    }
+    result = AnalysisResult([
+        InfoLine(1, 20, ["a0a1"], mate=-100),
+        InfoLine(2, 20, ["a0a2"], mate=-101),
+        InfoLine(3, 20, ["a0a3"], mate=0),
+    ], "a0a2")
+    assert {choose_move(result, get_level(level), random.Random(s)) for s in range(200)} == {
+        "a0a2",
+    }
+    result.lines.append(InfoLine(4, 20, ["a0a4"], score_cp=-1000, wdl=(0, 0, 1000)))
+    assert choose_move(result, get_level(level), random.Random(0)) == "a0a4"
+
+
+@pytest.mark.parametrize("level", [8, 9])
+def test_strong_variation_falls_back_without_comparable_candidates(level):
+    best = InfoLine(1, 20, ["a0a1"], wdl=(1000, 0, 0))
+    for alternative in [
+        InfoLine(2, 20, ["a0a2"], wdl=(1000, 0, 0)),  # 饱和 WDL 缺 cp。
+        InfoLine(2, 20, ["a0a2"], score_cp=1000, wdl=(1000, 0, 0)),
+        InfoLine(2, 19, ["a0a2"], score_cp=1000, wdl=(1000, 0, 0)),  # 旧深度。
+    ]:
+        result = AnalysisResult([best, alternative], "a0a1")
+        assert choose_move(result, get_level(level), random.Random(0)) == "a0a1"
+    result.bestmove = "b0c2"  # 最终着法没有对应 info。
+    assert choose_move(result, get_level(level), random.Random(0)) == "b0c2"
 
 
 def test_candidate_pool_applies_max_drop():

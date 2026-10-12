@@ -6,6 +6,8 @@
   --flavor=fairy   模拟 Fairy-Stockfish：行号 1–10，且必须先设置 UCI_Variant=xiangqi
   --die-on-go      收到 go 时像缺少权重文件的 Pikafish 一样报错退出
   --slow-start     收到 uci 后过 2 秒才回应（模拟加载权重文件很慢）
+  --slow-first-go  第一次有限搜索直到 stop 才结束（测试取消/超时）
+  --ignore-stop    慢搜索不响应 stop（测试无响应后的进程清理）
 """
 
 import queue
@@ -20,6 +22,8 @@ ARGS = sys.argv[1:]
 FAIRY = "--flavor=fairy" in ARGS
 DIE_ON_GO = "--die-on-go" in ARGS
 SLOW_START = "--slow-start" in ARGS
+SLOW_FIRST_GO = "--slow-first-go" in ARGS
+IGNORE_STOP = "--ignore-stop" in ARGS
 MOVE_RE = re.compile(r"^([a-i])(\d{1,2})([a-i])(\d{1,2})$")
 
 
@@ -46,6 +50,7 @@ class State:
     multipv = 1
     show_wdl = False
     variant = "chess"
+    searches = 0
 
 
 def emit(depth: int, only: set[str] | None = None) -> str | None:
@@ -135,11 +140,29 @@ def main() -> None:
                 if nxt == "quit":
                     return
             else:
+                State.searches += 1
                 tokens = cmd.split()
                 only = None
                 if "searchmoves" in tokens:
                     only = {from_engine(t) for t in tokens[tokens.index("searchmoves") + 1 :]}
                 best = None
+                if SLOW_FIRST_GO and State.searches == 1:
+                    depth = 1
+                    while True:
+                        best = emit(depth, only)
+                        depth += 1
+                        try:
+                            nxt = commands.get(timeout=0.02)
+                        except queue.Empty:
+                            continue
+                        if nxt == "quit":
+                            return
+                        if nxt == "isready":
+                            out("readyok")  # UCI 要求搜索期间也立即答复 isready。
+                        if nxt == "stop" and not IGNORE_STOP:
+                            break
+                    out(f"bestmove {to_engine(best) if best else '(none)'}")
+                    continue
                 for depth in (1, 2, 3):
                     best = emit(depth, only)
                 if best is None:

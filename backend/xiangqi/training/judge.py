@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from ..engine import Limit, UciEngine
+from ..engine import EngineError, Limit, UciEngine
 from ..llm import EngineLine
 from .review import MULTIPV, lines_from
 
@@ -52,7 +52,9 @@ async def judge_moves(
             initial_fen, list(moves), limit=limit, multipv=len(wanted), searchmoves=wanted
         )
         scores = {line.move: line.score for line in lines_from(restricted)}
-    return Judgement(lines, {m: scores[m] for m in wanted if m in scores})
+    if any(move not in scores for move in wanted):
+        raise EngineError("引擎未确认所有待比较着法的评分，请重试")
+    return Judgement(lines, {move: scores[move] for move in wanted})
 
 
 def close_enough(score: float, reference: float, tolerance: float = 0.03) -> bool:

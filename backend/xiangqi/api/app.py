@@ -1,5 +1,6 @@
 """FastAPI 应用：/api 下是接口，/ws 下是 WebSocket，其余路径提供前端页面。"""
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -47,6 +48,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.engines = engines
     app.state.analysis_task = None  # 当前正在进行的实时分析（全局只有一个）
     app.state.analysis_socket = None
+    app.state.analysis_request_id = None
+    app.state.analysis_lock = asyncio.Lock()  # 抢占与注册新分析必须作为一次操作
     app.state.library = library
     app.state.import_jobs = {}
     app.state.review_jobs = {}

@@ -27,7 +27,7 @@ from ..core.features import (
     threatened,
 )
 from ..core.intent import purpose_of_move
-from ..core.movegen import in_check
+from ..core.movegen import in_check, is_legal_move
 from ..core.notation import chinese_variants
 from .validate import move_key
 
@@ -169,26 +169,35 @@ def _capture_effect(board: list[int], move: Move) -> str:
 
 
 def _material_swing(pos: Position, moves: list[str]) -> tuple[list[str], list[str], float] | None:
-    """按着法序列走下去，双方各吃掉了什么，以及走棋方的子力净得失。没有吃子时返回 None。"""
+    """按完整合法变化统计子力；不完整的非法变化不提供净得失事实。"""
     mover = pos.turn
-    p = pos.copy()
+    board, turn = list(pos.board), pos.turn
     gained: list[str] = []  # 走棋方吃掉的
     lost: list[str] = []  # 走棋方被吃掉的
     net = 0.0
-    for text in moves:
-        move = parse_iccs(text)
-        if not p.is_legal(move):
+    for index, text in enumerate(moves):
+        try:
+            move = parse_iccs(text)
+        except ValueError:
+            return None
+        if not is_legal_move(board, turn, move):
+            return None
+        frm, to = move
+        captured = board[to]
+        if abs(captured) == KING:
+            if index != len(moves) - 1:
+                return None
             break
-        captured = p.board[move[1]]
         if captured:
-            value = piece_value(captured, move[1])
+            value = piece_value(captured, to)
             if captured * mover < 0:
                 gained.append(piece_name(captured))
                 net += value
             else:
                 lost.append(piece_name(captured))
                 net -= value
-        p.push(move)
+        board[to], board[frm] = board[frm], 0
+        turn = -turn
     if not gained and not lost:
         return None
     return gained, lost, net
@@ -340,7 +349,7 @@ def build_context(
             if effect:
                 key_facts.append(fact)
 
-        swing = _material_swing(pos, [move_iccs, *after[0].pv[:3]])
+        swing = _material_swing(pos, [move_iccs, *after[0].pv])
         if swing is not None:
             gained, lost, net = swing
             parts = []
@@ -373,7 +382,7 @@ def build_context(
     purpose = purpose_of_move(
         pos,
         move_iccs,
-        pv=list(after[0].pv)[:3] if after else None,
+        pv=list(after[0].pv) if after else None,
         score_before=win_before,
         score_after=win_after,
         deep=False,

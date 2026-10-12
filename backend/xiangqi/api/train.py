@@ -20,15 +20,14 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from ..core import NotationError, Position, move_to_chinese, move_to_iccs, parse_iccs, parse_move
 from ..core.variation import pv_to_chinese
-from ..engine import EngineError, EngineUnavailable, Limit
+from ..engine import Limit
 from ..llm import build_context
 from ..training import (
     TrainingStore,
     close_enough,
     evaluate_position,
-    grade_move,
+    grade_last_move,
     judge_moves,
-    lines_from,
 )
 from ..training.puzzles import BASE_RATING, USER_RATING_KEY, update_rating
 from ..training.srs import schedule
@@ -120,7 +119,7 @@ async def _read_move(fen: str, text: str | None) -> str | None:
 
 
 async def _is_correct(request: Request, fen: str, move: str | None, solution: str) -> bool:
-    """走的就是正解算对；否则请引擎比较，和正解相差不到 3% 也算对（引擎不可用时只认正解）。"""
+    """走的就是正解算对；否则比较评分。未配置引擎时只认正解，评分失败允许重试。"""
     if move is None:
         return False
     if move == solution:
@@ -128,32 +127,40 @@ async def _is_correct(request: Request, fen: str, move: str | None, solution: st
     engines = request.app.state.engines
     if not engines.configured:
         return False
-    try:
-        engine = await engines.reviewer()
-        judgement = await judge_moves(engine, fen, [], [move, solution], limit=_limit(request))
-    except (EngineUnavailable, EngineError, TimeoutError):
-        return False
+    engine = await run_engine(engines.reviewer)
+    judgement = await run_engine(
+        lambda: judge_moves(engine, fen, [], [move, solution], limit=_limit(request))
+    )
     mine, best = judgement.scores.get(move), judgement.scores.get(solution)
     return mine is not None and best is not None and close_enough(mine, best)
 
 
 async def _explain(request: Request, fen: str, move: str, *, judge_grade: bool) -> dict:
-    """讲解 fen 局面里的 move：引擎分析走之前和走之后的局面，交给讲解流水线。
+    """讲解 fen 局面里的 move：分析前局面，优先复用同次候选的合法应着。
     judge_grade 为 True 时按得分下降给 move 评级（讲解错着），否则不评级（讲解正解）。"""
     engine = await run_engine(request.app.state.engines.reviewer)
     limit, rules = _limit(request), request.app.state.config.rules
     pos = _position(fen)
-    before = lines_from(await run_engine(lambda: engine.analyse(fen, [], limit=limit, multipv=3)))
-    # 走完就分出胜负（如一步杀）时按结果计分，不调用引擎
+    cache = request.app.state.analysis_cache
+    before_eval = await run_engine(
+        lambda: evaluate_position(engine, fen, [], limit=limit, rules=rules, multipv=3, cache=cache)
+    )
+    before = before_eval.lines
+    # 规则终局优先；候选的合法后续已给出应着和评分时，免掉重复搜索。
     after_eval = await run_engine(
-        lambda: evaluate_position(engine, fen, [move], limit=limit, rules=rules, multipv=1)
+        lambda: evaluate_position(
+            engine, fen, [move], limit=limit, rules=rules, multipv=1, cache=cache,
+            reuse_reply_from=before_eval,
+        )
     )
     after = after_eval.lines
     win_before = before[0].score if before else None
-    win_after = after_eval.score_for(pos.turn) if after or after_eval.terminal else None
+    win_after = round(after_eval.score_for(pos.turn), 4) if after or after_eval.terminal else None
     grade = None
     if judge_grade and win_before is not None and win_after is not None:
-        grade = grade_move(max(0.0, win_before - win_after), is_best=False, gap=None)
+        evaluated = grade_last_move(fen, [move], before_eval, after_eval)
+        grade = evaluated.grade
+        win_before, win_after = evaluated.win_before, evaluated.win_after
     explainer = request.app.state.explainer
     ctx = build_context(
         pos,

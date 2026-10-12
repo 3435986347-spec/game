@@ -142,12 +142,14 @@ async def explain_move(game_id: str, body: ExplainRequest, request: Request) -> 
     explainer = request.app.state.explainer
     extra_facts = []
     before_pos = position_after(game.initial_fen, list(history[:-1]), len(history) - 1)
-    match = match_move(request.app.state.trap_index, before_pos, g.move)
+    match = match_move(request.app.state.trap_index, before_pos, g.move, game._selected_trap_id)
     if match is not None:
         # 这步属于飞刀剧本：说明它是执刀方的诱饵还是受害者踩进了陷阱，
         # 让引擎评分与「飞刀推荐」之间的关系一目了然（只写飞刀名，不带额外着法，保证白名单校验通过）
         if match.trap.side == g.side:
-            extra_facts.append(f"这步是「{match.trap.name}」飞刀的诱饵着法（{match.trap.side_name}执刀弃子设陷阱）。")
+            extra_facts.append(
+                f"这步是「{match.trap.name}」飞刀的诱饵着法（{match.trap.side_name}执刀弃子设陷阱）。"
+            )
         else:
             extra_facts.append(f"这步走进了对方「{match.trap.name}」飞刀的陷阱。")
     ctx = move_context(

@@ -18,7 +18,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 FLAVORS = ("pikafish", "fairy-stockfish")
@@ -106,6 +106,8 @@ class InfoLine:
     wdl: tuple[int, int, int] | None = None  # 胜/和/负，千分比
     nodes: int | None = None
     bound: str | None = None  # "lower" / "upper"，不是精确值时
+    time_ms: int | None = None  # 引擎报告的本次搜索耗时（UCI time）
+    nps: int | None = None  # 引擎报告的搜索速度（nodes per second）
 
     @property
     def move(self) -> str:
@@ -133,6 +135,16 @@ class AnalysisResult:
     engine_messages: list[str] = field(default_factory=list)  # 引擎输出的 info string
 
 
+@dataclass(frozen=True)
+class CompletedSearch:
+    """已收到 bestmove 的持续搜索，保留输入签名供调用方安全复用。"""
+
+    initial_fen: str
+    moves: tuple[str, ...]
+    multipv: int
+    result: AnalysisResult
+
+
 def parse_info(line: str, flavor: str) -> InfoLine | None:
     """解析 info 行。没有 pv 或分数的行（如 currmove、info string）返回 None。"""
     tokens = line.split()
@@ -158,11 +170,11 @@ def parse_info(line: str, flavor: str) -> InfoLine | None:
             values["wdl"] = (int(tokens[i + 1]), int(tokens[i + 2]), int(tokens[i + 3]))
             i += 4
             continue
-        if key in ("depth", "multipv", "nodes") and i + 1 < len(tokens):
+        if key in ("depth", "multipv", "nodes", "time", "nps") and i + 1 < len(tokens):
             values[key] = int(tokens[i + 1])
             i += 2
             continue
-        i += 1  # 其他字段（seldepth、nps、time、hashfull……）跳过键，值在下一轮被当作未知键跳过
+        i += 1  # 其他字段（seldepth、hashfull……）跳过键，值在下一轮被当作未知键跳过
     if (
         "pv" not in values
         or not values["pv"]
@@ -178,6 +190,8 @@ def parse_info(line: str, flavor: str) -> InfoLine | None:
         wdl=values.get("wdl"),  # type: ignore[arg-type]
         nodes=values.get("nodes"),  # type: ignore[arg-type]
         bound=values.get("bound"),  # type: ignore[arg-type]
+        time_ms=values.get("time"),  # type: ignore[arg-type]
+        nps=values.get("nps"),  # type: ignore[arg-type]
     )
 
 
@@ -222,6 +236,7 @@ class UciEngine:
         self._messages: list[str] = []  # 最近的 info string，出错时用于说明原因
         self._multipv = 1
         self._eof = False  # 引擎输出已结束（进程正在或已经退出）
+        self.completed_search: CompletedSearch | None = None
 
     # ---- 生命周期 ----
 
@@ -286,6 +301,7 @@ class UciEngine:
 
     def kill(self) -> None:
         """立即结束进程（不等待引擎响应）。"""
+        self.completed_search = None
         proc, self._proc = self._proc, None
         if proc is not None and proc.poll() is None:
             proc.kill()
@@ -295,6 +311,7 @@ class UciEngine:
                 pass
 
     async def close(self) -> None:
+        self.completed_search = None
         proc = self._proc
         if proc is None:
             return
@@ -328,6 +345,7 @@ class UciEngine:
         """
         async with self._lock:
             self._ensure_alive()
+            self.completed_search = None
             self._messages = []
             await self._prepare(fen, moves, multipv)
             go = limit.go_command()
@@ -338,20 +356,26 @@ class UciEngine:
             lines: dict[int, InfoLine] = {}
             latest: dict[int, InfoLine] = {}  # 每条候选最后一次输出（包括上下界）
             try:
-                bestmove = await self._collect_until_bestmove(lines, limit.timeout(), latest)
-            except TimeoutError:
-                self._send("stop")
-                bestmove = await self._collect_until_bestmove(lines, 10.0, latest)
-            first = lines.get(1)
-            if bestmove and first is not None and first.move != bestmove:
-                # 搜索在窗口失败时被打断，引擎按最后（上下界）结果给出 bestmove：以它为准
-                if 1 in latest and latest[1].move == bestmove:
-                    lines[1] = latest[1]
-            return AnalysisResult(
-                lines=_snapshot(lines),
-                bestmove=bestmove,
-                engine_messages=list(self._messages),
-            )
+                try:
+                    bestmove = await self._collect_until_bestmove(lines, limit.timeout(), latest)
+                except TimeoutError:
+                    self._send("stop")
+                    bestmove = await self._collect_until_bestmove(lines, 10.0, latest)
+            except asyncio.CancelledError:
+                # isready 在搜索期间也会回复，不能用它代替 stop / bestmove 握手。
+                # 先排空旧搜索再释放锁，下一请求才不会读到上一局面的 bestmove。
+                if self.alive:
+                    try:
+                        self._send("stop")
+                        await self._collect_until_bestmove({}, 10.0)
+                    except BaseException:  # 包括再次取消和损坏输出，始终结束失去同步的进程。
+                        await self._kill()
+                raise
+            except BaseException:
+                # stop 后仍无响应，或输出解析失败：结束失去同步的进程，服务下次自动重启。
+                await self._kill()
+                raise
+            return self._analysis_result(lines, latest, bestmove)
 
     async def analyse_infinite(
         self, fen: str, moves: Sequence[str] = (), *, multipv: int = 1
@@ -362,30 +386,70 @@ class UciEngine:
         """
         async with self._lock:
             self._ensure_alive()
+            self.completed_search = None
             self._messages = []
             await self._prepare(fen, moves, multipv)
             self._send("go infinite")
             lines: dict[int, InfoLine] = {}
+            latest: dict[int, InfoLine] = {}
             finished = False
             try:
                 while True:
                     raw = await self._readline(None)
                     if raw.startswith("bestmove"):
+                        parts = raw.split()
+                        bestmove = (
+                            from_engine_move(parts[1], self.flavor)
+                            if len(parts) > 1 and parts[1] not in ("(none)", "0000", "none")
+                            else None
+                        )
+                        self.completed_search = CompletedSearch(
+                            fen, tuple(moves), multipv,
+                            self._analysis_result(lines, latest, bestmove),
+                        )
                         finished = True
                         return
                     info = self._handle_line(raw)
                     if info is not None:
                         _merge(lines, info)
+                        latest[info.multipv] = info
                         yield _snapshot(lines)
             finally:
                 if not finished and self.alive:
                     self._send("stop")
                     try:
-                        await self._collect_until_bestmove({}, 10.0)
+                        bestmove = await self._collect_until_bestmove(lines, 10.0, latest)
+                        self.completed_search = CompletedSearch(
+                            fen, tuple(moves), multipv,
+                            self._analysis_result(lines, latest, bestmove),
+                        )
                     except (EngineError, TimeoutError):
                         await self._kill()
+                    except BaseException:
+                        # 二次取消也不能留下尚未同步的持续搜索。
+                        await self._kill()
+                        raise
 
     # ---- 内部 ----
+
+    def _analysis_result(
+        self, lines: dict[int, InfoLine], latest: dict[int, InfoLine], bestmove: str | None,
+    ) -> AnalysisResult:
+        # 实时快照为保持稳定的评分，会把窗口重搜的累计时间附在上一条精确结果上。
+        # 任何分析完成后都不能把这段时间当作该精确评分的搜索证据：停止时仍只有上下界的
+        # 候选必须恢复界限标记，包括 bestmove 未改变以及非第一名的候选。
+        lines = dict(lines)
+        for rank, info in latest.items():
+            if info.bound is not None:
+                lines[rank] = info
+        first = lines.get(1)
+        if bestmove and first is not None and first.move != bestmove:
+            # 窗口失败时，最终 bestmove 可能来自尚未确认的上下界；保留界限标记。
+            if 1 in latest and latest[1].move == bestmove:
+                lines[1] = latest[1]
+        return AnalysisResult(
+            lines=_snapshot(lines), bestmove=bestmove, engine_messages=list(self._messages),
+        )
 
     async def _prepare(self, fen: str, moves: Sequence[str], multipv: int) -> None:
         if multipv != self._multipv and "MultiPV" in self.supported_options:
@@ -477,6 +541,19 @@ def _merge(lines: dict[int, InfoLine], info: InfoLine) -> None:
     随后才是精确结果。所以带 bound 的行只在还没有任何结果时使用，不覆盖已有结果。
     """
     if info.bound is not None and info.multipv in lines:
+        # 窗口重搜不能替换已确认的评分/PV，但它报告的真实搜索进度仍然有效。
+        previous = lines[info.multipv]
+        lines[info.multipv] = replace(
+            previous,
+            nodes=(
+                max(previous.nodes or 0, info.nodes) if info.nodes is not None else previous.nodes
+            ),
+            time_ms=(
+                max(previous.time_ms or 0, info.time_ms)
+                if info.time_ms is not None else previous.time_ms
+            ),
+            nps=info.nps if info.nps is not None else previous.nps,
+        )
         return
     lines[info.multipv] = info
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { AnalysisInfo } from "./api";
 import { positionKey } from "./fen";
+import { AnalysisSession } from "./analysisSession";
 
 /** 分析对象：对弈中的对局（分析其当前局面），或任意局面（起始 FEN + 着法）。 */
 export type AnalysisTarget = { gameId: string } | { fen: string; moves: string[] };
@@ -31,9 +32,12 @@ export function useAnalysis(
   const failures = useRef(0); // 连续失败次数，决定重连等待时间
   const fenRef = useRef(fen);
   fenRef.current = fen;
-  // 收到过「缓存里的更深结果」（seeded）后，忽略比它浅的实时更新，直到实时超过它。
-  // 换局面时必须清零（在 start 发送时做），否则新局面的浅层结果会被旧门槛吞掉。
-  const seededDepth = useRef(0);
+  // 保留较深缓存的候选着法，同时独立展示本次搜索的实际进度。
+  const seededInfo = useRef<AnalysisInfo | null>(null);
+  const lastBest = useRef<string | null>(null);
+  const session = useRef<AnalysisSession | null>(null);
+  const connections = useRef(new WeakMap<WebSocket, number>());
+  if (!session.current) session.current = new AnalysisSession();
 
   useEffect(() => {
     if (!enabled) return;
@@ -41,22 +45,37 @@ export function useAnalysis(
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     const protocol = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${protocol}://${location.host}/ws/analysis`);
+    const connection = session.current!.connect();
+    connections.current.set(ws, connection);
     ws.onopen = () => {
+      if (closedByUs || !session.current!.isConnected(connection)) return;
       failures.current = 0;
       setError(null);
       setSocket(ws);
     };
     ws.onmessage = (event) => {
+      if (closedByUs || !session.current!.isConnected(connection)) return;
       const message = JSON.parse(event.data);
+      if (message.type === "info" && !session.current!.accepts(connection, message.request_id)) return;
+      if (message.type === "error" && message.request_id !== undefined
+        && !session.current!.accepts(connection, message.request_id)) return;
       if (message.type === "info" && sameFen(message.fen, fenRef.current)) {
         if (message.seeded) {
-          // 缓存结果先顶上：立刻有内容，但实时搜索没超过这个深度前不再更新
-          seededDepth.current = Math.max(seededDepth.current, message.depth);
+          seededInfo.current = message;
           setInfo(message);
           setError(null);
-        } else if (message.depth > seededDepth.current) {
-          seededDepth.current = 0; // 实时搜索超过了缓存深度，恢复逐次更新
-          setInfo(message);
+        } else {
+          const live: AnalysisInfo = message;
+          const best = live.lines[0]?.move ?? null;
+          const unchanged = best !== null && best === lastBest.current;
+          lastBest.current = best;
+          const cached = seededInfo.current;
+          if (cached && live.depth <= cached.depth && live.status !== "complete") {
+            setInfo({ ...cached, search: live.search, status: live.status });
+          } else {
+            seededInfo.current = null;
+            setInfo({ ...live, best_unchanged: unchanged });
+          }
           setError(null);
         }
       } else if (message.type === "error") {
@@ -64,8 +83,11 @@ export function useAnalysis(
       }
     };
     ws.onclose = () => {
-      setSocket(null);
-      if (closedByUs) return;
+      if (closedByUs || !session.current!.disconnect(connection)) return;
+      setSocket((current) => current === ws ? null : current);
+      seededInfo.current = null;
+      lastBest.current = null;
+      setInfo(null);
       setError("实时分析连接已断开，正在重连……");
       const delay = RECONNECT_DELAYS_MS[Math.min(failures.current, RECONNECT_DELAYS_MS.length - 1)];
       failures.current += 1;
@@ -75,9 +97,11 @@ export function useAnalysis(
       closedByUs = true;
       clearTimeout(retryTimer);
       ws.close();
-      setSocket(null);
-      setInfo(null);
-      setError(null);
+      if (session.current!.disconnect(connection)) {
+        setSocket((current) => current === ws ? null : current);
+        setInfo(null);
+        setError(null);
+      }
     };
   }, [enabled, generation]);
 
@@ -87,14 +111,24 @@ export function useAnalysis(
       ? { type: "start", game_id: target.gameId, multipv: 3 }
       : { type: "start", fen: target.fen, moves: target.moves, multipv: 3 },
   );
+  const targetKey = JSON.stringify([start, fen, finished]);
 
   useEffect(() => {
-    if (!socket || !start) return;
-    seededDepth.current = 0; // 换了局面：旧局面的缓存深度门槛作废，新局面的实时结果照常显示
-    socket.send(finished ? JSON.stringify({ type: "stop" }) : start);
-  }, [socket, start, fen, finished]);
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    const connection = session.current!;
+    // socket 对应的连接编号在闭包中；失效连接不能生成新请求。
+    const requestId = connection.start(connections.current.get(socket) ?? 0, targetKey);
+    if (!requestId) return;
+    seededInfo.current = null;
+    lastBest.current = null;
+    setInfo(null);
+    setError(null);
+    const message = finished || !start || !fen ? { type: "stop" } : JSON.parse(start);
+    socket.send(JSON.stringify({ ...message, request_id: requestId }));
+  }, [socket, start, fen, finished, targetKey]);
 
-  const current = info && sameFen(info.fen, fen) ? info : null;
+  const current = info && sameFen(info.fen, fen)
+    && session.current!.matches(targetKey, info.request_id) ? info : null;
   return { info: enabled ? current : null, error: enabled ? error : null };
 }
 

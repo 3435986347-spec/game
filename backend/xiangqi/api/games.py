@@ -7,7 +7,7 @@ import logging
 import random
 import sqlite3
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -32,11 +32,14 @@ from ..engine import (
     EngineError,
     EngineService,
     EngineUnavailable,
+    InfoLine,
     Limit,
     UciEngine,
     choose_move,
     get_level,
 )
+from ..engine.cache import _exact_score as has_exact_score
+from ..engine.cache import _quality as analysis_quality
 from ..library import Library, my_game_headers
 from ..openings import TRAP_LINES, match_move, move_note, trap_advice
 from ..openings.index import match_position
@@ -80,6 +83,8 @@ class Game:
     # 飞刀剧本：AI 先按 book 走（走完或人一变招就转引擎自由应变）
     book: tuple[str, ...] = ()
     book_name: str | None = None
+    # 保留选择的具体变例；人一变招、book 清空后，标注仍按这条飞刀优先。
+    _selected_trap_id: str | None = None
     # 提示的分析结果，按「完整着法历史」缓存：同一局面、同一历史才复用
     _hint_cache: tuple[tuple[str, ...], AnalysisResult] | None = None
     # 3 级提示用：对方最佳应着的分析（键：历史 + 推荐着法）
@@ -110,6 +115,7 @@ class Game:
                 line = TRAP_LINES.get(body.trap_id)
                 if line is None:
                     raise GameError(f"飞刀 {body.trap_id!r} 不存在（可用 /api/traps 查询）")
+            game._selected_trap_id = line.trap.id
             if body.mode == "vs_ai":
                 ai_plays = body.ai_plays or "trap"
                 game.ai_side = line.trap.side if ai_plays == "trap" else -line.trap.side
@@ -368,7 +374,8 @@ async def ai_move(game_id: str, request: Request) -> GameView:
         level = get_level(game.ai_level or 1)
         engine = await run_engine(_engines(request).player)
         result = await run_engine(
-            lambda: engine.analyse(
+            lambda: request.app.state.analysis_cache.get_or_analyse(
+                engine,
                 game.initial_fen, game.move_list, limit=level.limit(), multipv=level.multipv
             )
         )
@@ -392,23 +399,71 @@ async def _hint_analysis(
     不传 engine 时按需启动对局引擎。引擎不可用时抛 EngineUnavailable / EngineError；
     给不出合法着法时抛 EngineError。同样的局面还会命中全局分析缓存（跨对局复用）。"""
     history = tuple(game.move_list)
-    if game._hint_cache is not None and game._hint_cache[0] == history:
-        return game._hint_cache[1]
+    local = (
+        game._hint_cache[1]
+        if game._hint_cache is not None and game._hint_cache[0] == history
+        else None
+    )
+    if local is not None and (not local.lines or not has_exact_score(local.lines[0])):
+        local = None
+        game._hint_cache = None
     engines = _engines(request)
     movetime = engines.config.hint_movetime_ms if engines.config else 1500
     cache = request.app.state.analysis_cache
     analysis = cache.get(game.initial_fen, history, 1, movetime)  # 先查缓存再动引擎
+    # 提示之后可能又完成了更深研究。优先升级为更强的完整结果，同时保留已被全局
+    # LRU 淘汰的本地深结果；仅有实时快照或较浅的重搜都不能使提示降级。
+    if local is not None and (
+        analysis is None or analysis_quality(local, 1) >= analysis_quality(analysis, 1)
+    ):
+        analysis = local
     if analysis is None:
         engine = engine or await engines.player()
-        analysis = await engine.analyse(
+        analysis = await cache.get_or_analyse(
+            engine,
             game.initial_fen, game.move_list, limit=Limit(movetime_ms=movetime), multipv=1
         )
-        cache.put(game.initial_fen, history, 1, movetime, analysis)
-    if not analysis.lines or not _is_legal_text(game.position, analysis.lines[0].move):
+    if not _confirmed_hint(analysis):
+        # 极短搜索可能恰好停在窗口重搜中。只补搜一次，让评分有机会收敛；
+        # 仍未确认时仅推荐最终合法着法，不展示评分，也不缩减原配置的搜索预算。
+        engine = engine or await engines.player()
+        analysis = await cache.get_or_analyse(
+            engine,
+            game.initial_fen, history, limit=Limit(movetime_ms=max(300, movetime)), multipv=1
+        )
+    if not _confirmed_hint(analysis):
+        game._hint_cache = None
+        bestmove = analysis.bestmove
+        if not bestmove or not _is_legal_text(game.position, bestmove):
+            raise EngineError("引擎没有给出合法的着法，请检查 config.toml 中 [engine] 的 flavor")
+        candidate = next(
+            (line for line in analysis.lines if line.pv and line.move == bestmove), None
+        )
+        pending = (
+            replace(candidate, multipv=1, bound=candidate.bound or "pending")
+            if candidate is not None
+            else InfoLine(1, 0, [bestmove], bound="pending")
+        )
+        # 未确认评分的结果只用于本次提示，不进入本地或全局的完整搜索缓存。
+        return AnalysisResult([pending], bestmove, list(analysis.engine_messages))
+    if not _is_legal_text(game.position, analysis.lines[0].move):
         game._hint_cache = None
         raise EngineError("引擎没有给出合法的着法，请检查 config.toml 中 [engine] 的 flavor")
+    if analysis != local:
+        # 最佳着法没变也可能有新的后续/分数，不能搭配旧的应着讲解。
+        for key in list(game._hint_reply_cache):
+            if key[0] == history:
+                del game._hint_reply_cache[key]
     game._hint_cache = (history, analysis)
     return analysis
+
+
+def _confirmed_hint(result: AnalysisResult) -> bool:
+    return bool(
+        result.lines
+        and has_exact_score(result.lines[0])
+        and result.bestmove == result.lines[0].move
+    )
 
 
 async def _hint_reply(request: Request, game: Game, move: str) -> AnalysisResult | None:
@@ -419,7 +474,9 @@ async def _hint_reply(request: Request, game: Game, move: str) -> AnalysisResult
     key = (history, move)
     cached = game._hint_reply_cache.get(key)
     if cached is not None:
-        return cached
+        if cached.lines and has_exact_score(cached.lines[0]):
+            return cached
+        del game._hint_reply_cache[key]
     configured_ms = engines.config.hint_movetime_ms if engines.config else 1500
     movetime = max(300, min(configured_ms // 2, 600))
     moves = [*game.move_list, move]
@@ -427,11 +484,10 @@ async def _hint_reply(request: Request, game: Game, move: str) -> AnalysisResult
     analysis = cache.get(game.initial_fen, moves, 1, movetime)  # 先查缓存再动引擎
     if analysis is None:
         engine = await engines.player()
-        analysis = await engine.analyse(
-            game.initial_fen, moves, limit=Limit(movetime_ms=movetime)
+        analysis = await cache.get_or_analyse(
+            engine, game.initial_fen, moves, limit=Limit(movetime_ms=movetime)
         )
-        cache.put(game.initial_fen, moves, 1, movetime, analysis)
-    if not analysis.lines:
+    if not analysis.lines or not has_exact_score(analysis.lines[0]):
         return None
     game._hint_reply_cache[key] = analysis
     return analysis
@@ -465,11 +521,20 @@ async def hint(game_id: str, body: HintRequest, request: Request) -> HintView:
         best = analysis.lines[0]
         if body.level == 2:
             return _hint_view(pos, best, level=2)
+        if not has_exact_score(best):
+            return _hint_view(pos, best, level=3)
         try:
             reply = await run_engine(lambda: _hint_reply(request, game, best.move))
         except HTTPException:
             reply = None  # 应着搜索失败不影响提示本身
-        return _hint_view(pos, best, level=3, reply=reply, trap_index=request.app.state.trap_index)
+        return _hint_view(
+            pos,
+            best,
+            level=3,
+            reply=reply,
+            trap_index=request.app.state.trap_index,
+            preferred_trap_id=game._selected_trap_id,
+        )
 
 
 def _is_legal_text(pos: Position, text: str) -> bool:
@@ -485,12 +550,19 @@ def _hint_view(
     level: int,
     reply: AnalysisResult | None = None,
     trap_index: dict | None = None,
+    preferred_trap_id: str | None = None,
 ) -> HintView:
     from_square = best.move[:2]
     piece = pos.board[parse_iccs(best.move)[0]]
     name = (RED_NAME if piece > 0 else BLACK_NAME)[abs(piece)]
     if level == 2:
         return HintView(level=2, from_square=from_square, text=f"提示：想想这个{name}可以怎么走。")
+    if not has_exact_score(best):
+        cn = move_to_chinese(pos.board, parse_iccs(best.move))
+        return HintView(
+            level=3, from_square=from_square, move=best.move, cn=cn, pv_cn=[cn],
+            text=f"引擎推荐：{cn}。本次评分尚未确认，可稍后再看评价。",
+        )
     pv_cn = pv_to_chinese(pos, best.pv) or [move_to_chinese(pos.board, parse_iccs(best.move))]
     red_win = red_expected(best.expected_score(), pos.turn)
     side_win = red_win if pos.turn == RED else 1 - red_win
@@ -507,7 +579,7 @@ def _hint_view(
         purpose = purpose_of_move(
             pos,
             best.move,
-            pv=list(r.pv)[:4],
+            pv=list(r.pv),
             score_before=best.expected_score(),
             score_after=score_after,
             deep=True,
@@ -529,14 +601,12 @@ def _hint_view(
     # 前端单独高亮显示，不混进 text。
     trap_note, alert = None, None
     if trap_index is not None:
-        match = match_move(trap_index, pos, best.move)
+        match = match_move(trap_index, pos, best.move, preferred_trap_id)
         if match is not None:
-            trap_note = TrapNoteView(
-                id=match.trap.id, name=match.trap.name, note=move_note(match)
-            )
+            trap_note = TrapNoteView(id=match.trap.id, name=match.trap.name, note=move_note(match))
         elif purpose.sacrifice:
             trap_note = TrapNoteView(id="sacrifice", name="飞刀", note=f"弃子抢攻：{purpose.text}")
-        advice = trap_advice(pos, match_position(trap_index, pos))
+        advice = trap_advice(pos, match_position(trap_index, pos, preferred_trap_id))
         if advice is not None:
             alert = TrapAlertView(
                 kind=advice.kind, id=advice.id, name=advice.name, advice=advice.advice

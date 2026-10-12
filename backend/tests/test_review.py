@@ -2,15 +2,17 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pytest
 from conftest import FAKE_ENGINE, play
 
-from xiangqi.core import RED, START_FEN, Position, RuleConfig
+from xiangqi.core import RED, START_FEN, Position, RuleConfig, parse_iccs
 from xiangqi.engine import Limit, UciEngine
 from xiangqi.llm import EngineLine
 from xiangqi.training import (
     PositionEval,
     analyse_positions,
     direction_hint,
+    grade_last_move,
     grade_move,
     grade_moves,
     move_accuracy,
@@ -28,6 +30,53 @@ def test_grade_thresholds():
     assert grade_move(0.08, is_best=False, gap=None) == "缓着"
     assert grade_move(0.15, is_best=False, gap=None) == "失误"
     assert grade_move(0.35, is_best=False, gap=None) == "漏着"
+
+
+@pytest.mark.parametrize(
+    "boundary,expected,higher",
+    [
+        (0.02, "好棋", "可以"),
+        (0.05, "可以", "缓着"),
+        (0.10, "缓着", "失误"),
+        (0.20, "失误", "漏着"),
+    ],
+)
+def test_float_subtraction_respects_exact_boundaries_without_coarse_rounding(
+    boundary, expected, higher
+):
+    subtraction = 0.8 - (0.8 - boundary)
+    assert grade_move(subtraction, is_best=False, gap=None) == expected
+    # 与边界只差 1e-8 也是真实超出，不能像四位舍入那样被吞掉。
+    assert grade_move(boundary + 1e-8, is_best=False, gap=None) == higher
+
+
+@pytest.mark.parametrize("side", [RED, -RED])
+@pytest.mark.parametrize("above", [False, True])
+@pytest.mark.parametrize(
+    "boundary,expected,higher",
+    [
+        (0.02, "好棋", "可以"),
+        (0.05, "可以", "缓着"),
+        (0.10, "缓着", "失误"),
+        (0.20, "失误", "漏着"),
+    ],
+)
+def test_grade_last_move_boundaries_in_both_mover_perspectives(
+    side, above, boundary, expected, higher
+):
+    position = Position.start()
+    if side != RED:
+        position.push(parse_iccs("h2e2"))
+    fen = position.fen()
+    best, played, reply = ("a0a1", "h2e2", "a9a8") if side == RED else ("a9a8", "h7e7", "a0a1")
+    drop = boundary + (0.0001 if above else 0)
+    score = round(0.8 - drop, 4)
+    before = ev(0, side, 0.8 if side == RED else 0.2, (best, 0.8), (played, score))
+    after = ev(1, -side, 0.25 if side == RED else 0.75, (reply, 0.75))
+    grade = grade_last_move(fen, [played], before, after)
+    assert grade.side == side
+    assert grade.win_before == 0.8 and grade.win_after == score
+    assert grade.grade == (higher if above else expected)
 
 
 def test_move_accuracy_range():
@@ -68,6 +117,32 @@ def test_best_move_counts_as_no_loss_even_if_next_eval_drops():
     evals = [ev(0, RED, 0.6, ("h2e2", 0.6)), ev(1, -RED, 0.5, ("h9g7", 0.5))]
     (g,) = grade_moves(START_FEN, moves, evals)
     assert g.is_best and g.drop == 0.0 and g.grade == "好棋"
+
+
+@pytest.mark.parametrize("side", [RED, -RED])
+@pytest.mark.parametrize("result_score", [0.0, 0.5, 1.0])
+def test_terminal_result_overrides_best_immunity_in_grades_accuracy_and_key_moments(
+    side, result_score
+):
+    position = Position.start()
+    if side != RED:
+        position.push(parse_iccs("h2e2"))
+    move, other = ("a0a1", "h2e2") if side == RED else ("a9a8", "h7e7")
+    before = ev(0, side, 0.9 if side == RED else 0.1, (move, 0.9), (other, 0.3))
+    after = PositionEval(
+        1, -side, result_score if side == RED else 1.0 - result_score,
+        [], "规则确定的终局",
+    )
+    (g,) = grade_moves(position.fen(), [move], [before, after])
+    last = grade_last_move(position.fen(), [move], before, after)
+    assert g == last and g.is_best and g.terminal
+    assert g.win_after == result_score
+    assert g.drop == pytest.approx(max(0.0, 0.9 - result_score))
+    assert g.grade == ("好棋" if result_score == 1.0 else "漏着")
+    summary = summarize([g], [side])
+    stats = summary["stats"]["red" if side == RED else "black"]
+    assert stats["accuracy"] == round(move_accuracy(g.drop), 1)
+    assert summary["key_moments"] == ([] if result_score == 1.0 else [1])
 
 
 def test_analyse_positions_with_fake_engine():

@@ -19,6 +19,7 @@ from xiangqi.llm import (
 )
 from xiangqi.llm.base import extract_json
 from xiangqi.llm.claude import ClaudeProvider
+from xiangqi.llm.context import _material_swing
 from xiangqi.llm.openai_compat import OpenAICompatProvider
 from xiangqi.llm.templates import template_explanation
 from xiangqi.llm.validate import find_moves, move_key, unknown_moves
@@ -97,6 +98,37 @@ def test_context_includes_purpose():
     ctx = blunder_context()
     assert ctx.purpose and ctx.purpose == ctx.data["purpose"]
     assert "吃掉" in ctx.purpose or "将军" in ctx.purpose  # 炮吃中卒
+
+
+def test_context_full_exchange_fact_and_purpose_do_not_claim_material_loss():
+    pos = Position.from_fen("r3k4/9/9/9/pRr6/R8/P8/9/C8/3K5 w - - 0 1")
+    pv = ("a4a5", "a9a5", "b5a5", "c5a5", "a1a5")
+    ctx = build_context(
+        pos, parse_iccs(pv[0]), before=[EngineLine(pv[0], pv, 0.6)],
+        after=[EngineLine(pv[1], pv[1:], 0.4)], win_before=0.6, win_after=0.6,
+        grade="好棋", level="入门",
+    )
+    assert "弃子" not in ctx.purpose
+    exchange_facts = [fact for fact in ctx.facts if fact.startswith("按这步加引擎主要变化")]
+    assert len(exchange_facts) == 1
+    assert "净赚约1分" in exchange_facts[0]
+    assert "亏子" not in ctx.tags
+
+
+def test_context_does_not_attribute_later_sacrifice_to_current_development():
+    pv = ("h2e2", "h9g7", "e2e6", "g7e6")
+    ctx = build_context(
+        Position.start(), parse_iccs(pv[0]), before=[EngineLine(pv[0], pv, 0.6)],
+        after=[EngineLine(pv[1], pv[1:], 0.4)], win_before=0.6, win_after=0.6,
+        grade="好棋", level="入门",
+    )
+    assert "弃子" not in ctx.purpose
+
+
+@pytest.mark.parametrize("tail", ["not-a-move", "e0e9"])
+def test_invalid_material_variation_does_not_leave_partial_exchange_fact(tail):
+    pos = play(Position.start(), "h2e2", "h9g7")
+    assert _material_swing(pos, ["e2e6", "g7e6", tail]) is None
 
 
 def test_template_is_concise_and_humanized():

@@ -136,6 +136,7 @@ class TrapDetailView(BaseModel):
     side: Side
     intro: str
     principle: str
+    source: str = Field(default="", description="可核对的公开棋谱来源")
     trap_ply: int
     trap_fen: str = Field(description="陷阱点局面（走完弃子着法之后，轮到受害者走）")
     start_fen: str = Field(description="陷阱着法之前的局面（执刀方走弃子那步前）")

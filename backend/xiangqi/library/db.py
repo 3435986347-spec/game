@@ -481,6 +481,47 @@ class Library:
         ]
         return info, rows
 
+    def update_review_grades(
+        self,
+        game_id: int,
+        *,
+        moves_hash: str,
+        previous_summary: dict,
+        summary: dict,
+        rows: list[dict],
+        clear_explanations: Iterable[int] = (),
+    ) -> bool:
+        """用原分析证据升级评级，保留搜索结果和分析时间；并发更新过的报告不覆盖。"""
+        conn = self.connect()
+        clear = frozenset(clear_explanations)
+        try:
+            updated = conn.execute(
+                "UPDATE reviews SET summary = ? "
+                "WHERE game_id = ? AND moves_hash = ? AND summary = ?",
+                (
+                    json.dumps(summary, ensure_ascii=False), game_id, moves_hash,
+                    json.dumps(previous_summary, ensure_ascii=False),
+                ),
+            ).rowcount
+            if not updated:
+                conn.rollback()
+                return False
+            conn.executemany(
+                """UPDATE move_analysis SET grade = :grade, win_before = :win_before,
+                       win_after = :win_after, is_best = :is_best, phase = :phase,
+                       explanation = CASE WHEN :clear_explanation THEN NULL ELSE explanation END
+                       WHERE game_id = :game_id AND ply = :ply""",
+                [
+                    {"game_id": game_id, **row, "clear_explanation": row["ply"] in clear}
+                    for row in rows if row["ply"] > 0
+                ],
+            )
+            conn.commit()
+            return True
+        except BaseException:
+            conn.rollback()
+            raise
+
     def set_explanation(self, game_id: int, ply: int, explanation: dict) -> None:
         conn = self.connect()
         conn.execute(
